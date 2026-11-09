@@ -1,4 +1,5 @@
 import * as g1 from "./group1.ts";
+import * as g2 from "./group2.ts";
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -7,9 +8,10 @@ const CORS = {
 };
 const PUBLIC = ["login","whoami","changeMyPassword","listUsers","createUser","updateUser","resetPassword","deleteUser","setMyChannels",
   "getStaff","addStaff","deleteStaff","getChannels","addChannel","deleteChannel","getShifts","addShift","updateShift","deleteShift",
-  "getShiftPhoto","checkIn","checkOut","getDatabaseUrl"];
+  "getShiftPhoto","checkIn","checkOut","getDatabaseUrl",
+  "submitEditRequest","listRequests","approveRequest","rejectRequest","previewImport","importShifts"];
 const FN: Record<string, (...a: any[]) => Promise<unknown>> = {};
-PUBLIC.forEach((n) => { if ((g1 as any)[n]) FN[n] = (g1 as any)[n]; });
+PUBLIC.forEach((n) => { const f = (g1 as any)[n] || (g2 as any)[n]; if (f) FN[n] = f; });
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });

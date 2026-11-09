@@ -13,6 +13,6 @@ Dữ liệu: Supabase project `jnzeawdffiwnblrlwtgx`, schema `chamcong` (RLS b�
 
 ## Trạng thái chuyển đổi
 - [x] Giai đoạn 1: đăng nhập, nhân sự, kênh, ca live, check-in/out, tài khoản
-- [ ] Giai đoạn 2: yêu cầu sửa ca, import ca
+- [x] Giai đoạn 2: yêu cầu sửa ca, import ca
 - [ ] Giai đoạn 3: bảng lương, chốt tháng, xuất Excel, lương cứng/thử việc/ngày lễ
 - [ ] Telegram, TikTok Live Data, chuyển tên miền live.eaztiktok.online
