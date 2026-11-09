@@ -2096,8 +2096,14 @@
         overlay(false);
         if(authGate(res)) return;
         if(!res || !res.success){ toast((res && res.error) || 'Xuất Excel thất bại.', true); return; }
-        window.open(res.url, '_blank');
-        toast('✓ Đã tạo file "'+res.fileName+'" — đang mở tải xuống.');
+        if(res.base64){
+          var bin = atob(res.base64), arr = new Uint8Array(bin.length);
+          for(var i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
+          var blob = new Blob([arr], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+          var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = res.fileName;
+          document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+        } else if(res.url){ window.open(res.url, '_blank'); }
+        toast('✓ Đã tạo file "'+res.fileName+'" — đang tải xuống.');
       })
       .withFailureHandler(function(e){ overlay(false); onFailure(e); })
       .exportPayrollXlsx(AUTH.token, month, state.payChannelFilter||[]);
