@@ -1,0 +1,3750 @@
+
+  /* ===== Kênh lấy động từ sheet Kenh; màu gán ổn định theo tên ===== */
+  var PALETTE = ['#e85fae','#9b6ef0','#45bce6','#f6a93b','#3bd1a6','#f48fb1','#5b8def','#e0913a'];
+  function channelColor(name){
+    var h = 0, s = String(name);
+    for(var i=0;i<s.length;i++){ h = (h*31 + s.charCodeAt(i)) >>> 0; }
+    return PALETTE[h % PALETTE.length];
+  }
+
+  var state = { records: [], staff: [], staffFull: [], channels: [], salary: {}, editingId: null, requests: [] };
+  function $(id){ return document.getElementById(id); }
+
+  /* ==================== INJECT CSS cho UI mapping tên (preview import) ====================
+   * Style này thuộc feature "cảnh báo tên gần giống khi import" — thêm tự động khi load.
+   * Có thể cắt và dán vào CSS.html để gọn nếu muốn, nhưng để đây cũng OK.
+   */
+  (function injectImportMappingCSS(){
+    var css = ''
+      + '.import-warn { background:#fff3d6; border-left:4px solid #f5a623; padding:12px 14px; border-radius:10px; margin-top:14px; color:#7a5100; font-size:13.5px; }'
+      + '.import-mapping { background:#fff; border:1.5px solid var(--line); border-radius:12px; padding:12px 14px; margin-top:10px; }'
+      + '.import-mapping-head { font-size:14px; margin-bottom:10px; color:var(--text); }'
+      + '.import-mapping-body { display:flex; flex-direction:column; gap:4px; }'
+      + '.import-radio { display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:8px; cursor:pointer; font-size:13.5px; flex-wrap:wrap; }'
+      + '.import-radio:hover { background:var(--field); }'
+      + '.import-radio input[type="radio"] { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; flex-shrink:0; margin:0; }'
+      + '.import-radio > span { line-height:1.4; }'
+      + '.score-badge { font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:999px; margin-left:auto; white-space:nowrap; }'
+      + '.score-exact, .score-high { background:#d6f4ee; color:#0c8c79; }'
+      + '.score-med { background:#fff3d6; color:#9a6a00; }'
+      + '.score-low { background:var(--field); color:var(--text-faint); }'
+      + '.cfg-name { display:flex; flex-direction:column; gap:2px; min-width:0; }'
+      + '.cfg-nameline { font-weight:600; }'
+      + '.cfg-subline { font-size:11.5px; color:var(--text-faint); font-weight:400; line-height:1.3; overflow:hidden; text-overflow:ellipsis; }'
+      + '.staff-row-merge { background:transparent; border:none; cursor:pointer; padding:4px 8px; border-radius:7px; color:var(--text-faint); font-size:13px; margin-left:auto; }'
+      + '.staff-row-merge:hover { color:var(--accent); background:var(--field); }'
+      + '.staff-row-code { flex:0 0 auto; width:130px; padding:5px 10px; border:1px solid transparent; border-radius:6px; background:transparent; font-size:11.5px; color:var(--text-faint); text-align:center; font-family:inherit; transition:all .15s; margin-left:auto; }'
+      + '.staff-row-code:hover { border-color:var(--line); color:var(--text); }'
+      + '.staff-row-code:focus { outline:none; border-color:var(--accent); background:var(--field); color:var(--text); }'
+      + '.staff-row-code:not([value=""]):not(:placeholder-shown) { color:var(--text); font-weight:600; background:var(--field); }'
+      + '.staff-row-code + .staff-row-merge { margin-left:0; }';
+    var s = document.createElement('style');
+    s.textContent = css;
+    (document.head || document.documentElement).appendChild(s);
+  })();
+
+  /* ===================== ĐĂNG NHẬP & PHÂN QUYỀN ===================== */
+  var AUTH = { token:null, role:null, channel:'', channels:[], staff:'', username:'' };
+  var PERM = { tabs:[], canAdd:false, canEdit:false, canDel:false, salaryEditable:false, manageUsers:false, usersLimited:false, manageReadonly:false, showForm:false, lockName:false, lockChannel:false };
+  var usersCache = [];
+  var editingUser = null;
+
+  function computePerm(role){
+    if(role==='owner') return { tabs:['dashboard','overview','payroll','manage','users'], canAdd:false, canEdit:true, canDel:true, salaryEditable:true, manageUsers:true, usersLimited:false, manageReadonly:false, showForm:false, checkInFlow:false, lockName:false, lockChannel:false };
+    if(role==='admin') return { tabs:['dashboard','overview','payroll','manage'], canAdd:false, canEdit:false, canDel:false, salaryEditable:false, manageUsers:false, usersLimited:false, manageReadonly:true, showForm:false, checkInFlow:false, lockName:false, lockChannel:false };
+    if(role==='lead')  return { tabs:['dashboard','overview','payroll','users'], canAdd:false, canEdit:true, canDel:true, salaryEditable:true, manageUsers:true, usersLimited:true, manageReadonly:false, showForm:false, checkInFlow:false, lockName:false, lockChannel:false };
+    if(role==='staff') return { tabs:['dashboard','overview','payroll'], canAdd:false, canEdit:false, canDel:false, salaryEditable:false, manageUsers:false, usersLimited:false, manageReadonly:false, showForm:false, checkInFlow:true, lockName:true, lockChannel:true };
+    return { tabs:[], canAdd:false, canEdit:false, canDel:false, salaryEditable:false, manageUsers:false, usersLimited:false, manageReadonly:false, showForm:false, checkInFlow:false, lockName:false, lockChannel:false };
+  }
+  function roleLabel(r){ return {owner:'Owner', admin:'Admin', lead:'Lead kênh', staff:'Nhân viên'}[r] || r; }
+  function roleCls(r){ return {owner:'r-owner', admin:'r-admin', lead:'r-lead', staff:'r-staff'}[r] || ''; }
+
+  // Nếu token hết hạn/không hợp lệ -> ép đăng nhập lại. Trả true nếu đã chặn.
+  function authGate(res){ if(res && res.code==='AUTH'){ doLogout(true); return true; } return false; }
+
+  function applyAuth(res){
+    if(res.token) AUTH.token = res.token;
+    AUTH.role = res.role; AUTH.channel = res.channel || ''; AUTH.staff = res.staff || ''; AUTH.username = res.username || '';
+    AUTH.channels = res.channels || (res.channel ? [res.channel] : []);
+    AUTH.firstLogin = !!res.firstLogin;
+    AUTH.managed = res.managed || [];
+    PERM = computePerm(AUTH.role);
+    try { if(res.token) localStorage.setItem('eaz_token', res.token); } catch(e){}
+  }
+  function showLogin(msg){
+    $('authScreen').style.display = 'flex';
+    $('wrap').style.display = 'none';
+    $('authMsg').textContent = msg || '';
+  }
+  function doLogin(){
+    var u = $('lg_user').value.trim(), p = $('lg_pass').value;
+    if(!u || !p){ $('authMsg').textContent = 'Nhập tài khoản và mật khẩu.'; return; }
+    $('lg_btn').disabled = true; $('authMsg').textContent = 'Đang đăng nhập…';
+    google.script.run
+      .withSuccessHandler(function(res){
+        $('lg_btn').disabled = false;
+        if(!res || !res.success){ $('authMsg').textContent = (res && res.error) || 'Đăng nhập thất bại.'; return; }
+        applyAuth(res); $('lg_pass').value = ''; $('authMsg').textContent = ''; startApp();
+      })
+      .withFailureHandler(function(e){ $('lg_btn').disabled = false; $('authMsg').textContent = 'Lỗi kết nối: ' + (e && e.message ? e.message : e); })
+      .login(u, p);
+  }
+  function doLogout(expired){
+    try { localStorage.removeItem('eaz_token'); } catch(e){}
+    AUTH = { token:null, role:null, channel:'', staff:'', username:'' };
+    showLogin(expired ? 'Phiên đã hết hạn, đăng nhập lại nhé.' : '');
+  }
+  function changeMyPasswordUI(){
+    var oldPw = prompt('Mật khẩu hiện tại:'); if(oldPw===null) return;
+    var newPw = prompt('Mật khẩu mới (tối thiểu 4 ký tự):'); if(newPw===null) return;
+    google.script.run.withSuccessHandler(function(res){
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Đổi mật khẩu thất bại.', true); return; }
+      toast('Đã đổi mật khẩu.');
+    }).withFailureHandler(onFailure).changeMyPassword(AUTH.token, oldPw, newPw);
+  }
+
+  function startApp(){
+    $('authScreen').style.display = 'none';
+    $('wrap').style.display = '';
+    applyRoleUI();
+    // TỐI ƯU: các lượt gọi backend độc lập chạy SONG SONG (không đợi nhau) — giảm thời gian tải ban đầu.
+    // loadRequests() vốn đã được gọi lại (refresh) bên trong loadShifts() mỗi khi ca live thay đổi — giữ nguyên,
+    // chỉ thêm 1 lượt gọi song song ở đây để "Yêu cầu chờ duyệt" hiện sớm hơn, không phải chờ getShifts xong trước.
+    loadChannels(); loadStaff(); loadShifts(); loadRequests();
+    if(PERM.manageUsers) loadUsers();
+    if(AUTH.role === 'owner'){
+      renderFixedStaffList();
+      google.script.run.withSuccessHandler(function(res){
+        if(res && res.success && res.url){ $('dbLink').innerHTML = ' · <a href="'+res.url+'" target="_blank">Mở Google Sheets database</a>'; }
+      }).withFailureHandler(function(){}).getDatabaseUrl(AUTH.token);
+    }
+  }
+
+  function applyRoleUI(){
+    $('userBox').style.display = '';
+    $('userName').textContent = AUTH.username;
+    var extra = (AUTH.role==='lead' && AUTH.channels.length) ? (' · ' + AUTH.channels.join(', '))
+              : (AUTH.role==='staff' && AUTH.staff) ? (' · ' + AUTH.staff) : '';
+    $('userRole').textContent = roleLabel(AUTH.role) + extra;
+    var first = null;
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(btn){
+      var t = btn.getAttribute('data-tab');
+      var ok = PERM.tabs.indexOf(t) >= 0;
+      btn.style.display = ok ? '' : 'none';
+      if(ok && !first) first = t;
+    });
+    // Quản lý: Admin chỉ xem -> ẩn các ô thêm/xoá (qua CSS .manage-readonly)
+    document.body.classList.toggle('manage-readonly', PERM.manageReadonly);
+    // Tài khoản: Lead xem được danh sách nhân viên của mình (để sửa kênh)
+    if($('usersListCard')) $('usersListCard').style.display = '';
+    // Import lịch sử: chỉ Owner
+    if($('importCard')) $('importCard').style.display = (AUTH.role==='owner') ? '' : 'none';
+    showTab(first);
+    // Form chấm công
+    $('colForm').style.display = (PERM.showForm || PERM.checkInFlow) ? '' : 'none';
+    $('grid-dashboard').classList.toggle('noform', !(PERM.showForm || PERM.checkInFlow));
+    $('manualFormCard').style.display = PERM.showForm ? '' : 'none';
+    $('checkCard').style.display = PERM.checkInFlow ? '' : 'none';
+    if(PERM.checkInFlow) renderCheckCard();
+    if(PERM.lockName){
+      $('nameSelectWrap').style.display = 'none';
+      $('f_nameLockedWrap').style.display = '';
+      $('f_nameLocked').textContent = AUTH.staff;
+    } else {
+      $('nameSelectWrap').style.display = '';
+      $('f_nameLockedWrap').style.display = 'none';
+    }
+  }
+  function showTab(t){
+    if(!t) return;
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(b){ b.classList.toggle('active', b.getAttribute('data-tab')===t); });
+    ['dashboard','overview','payroll','manage','users'].forEach(function(name){
+      var el = $('tab-'+name); if(el) el.style.display = (name===t) ? '' : 'none';
+    });
+    if(t==='overview') renderOverviewIfStale_();
+    if(t==='payroll') loadPayroll();
+    if(t==='users'){ if(PERM.usersLimited && usersCache.length === 0){ loadUsers(); } else { renderUsers(); } }
+  }
+
+
+  /* ----------------- Tiện ích ----------------- */
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function fmtVND(n){ return (Number(n)||0).toLocaleString('vi-VN'); }
+  function parseVND(s){ return Number(String(s).replace(/[^\d]/g,'')) || 0; }
+  function fmtDate(iso){
+    if(!iso) return '';
+    var p = String(iso).split('-');
+    if(p.length===3 && p[0].length===4) return p[2].slice(0,2)+'/'+p[1];
+    var d = new Date(iso);
+    if(!isNaN(d.getTime())){
+      return ('0'+d.getDate()).slice(-2)+'/'+('0'+(d.getMonth()+1)).slice(-2);
+    }
+    return String(iso);
+  }
+  // Loại ngày tự suy ra: Mega = ngày==tháng (1/1,2/2..12/12); Mini = ngày 1,15,25
+  function dayType(iso){
+    if(!iso) return null;
+    var mo, dy, p = String(iso).split('-');
+    if(p.length===3 && p[0].length===4){ mo = parseInt(p[1],10); dy = parseInt(p[2],10); }
+    else { var d = new Date(iso); if(isNaN(d.getTime())) return null; mo = d.getMonth()+1; dy = d.getDate(); }
+    if(!mo || !dy) return null;
+    if(dy === mo) return { key:'mega', label:'Mega Sale', short:'Mega' };
+    if(dy===1 || dy===15 || dy===25) return { key:'mini', label:'Mini Sale', short:'Mini' };
+    return { key:'normal', label:'Ngày thường', short:'' };
+  }
+  function fmtHours(h){ return (Number(h)||0).toFixed(1); }
+
+  function calcHours(start, end){
+    if(!start || !end) return 0;
+    var a = start.split(':').map(Number), b = end.split(':').map(Number);
+    var diff = (b[0]*60+b[1]) - (a[0]*60+a[1]);
+    if(diff <= 0) diff += 1440;
+    return diff/60;
+  }
+  function fmtDur(h){
+    var min = Math.round(h*60);
+    return Math.floor(min/60) + 'h ' + String(min%60).padStart(2,'0') + 'm';
+  }
+
+  /* Ép giá trị start/end về "HH:mm" — chống trường hợp Google Sheets trả về Date object
+   * (VD "Sat Dec 30 1899 12:00:00 GMT+0700...") khi ô bị đổi format thành Time/Date.
+   * Sau khi normalize, hiển thị + toMin + calcHours đều làm việc bình thường.
+   * Sửa 1 ca (bấm ✎) rồi Lưu sẽ ghi đè cell về text đúng, tự khắc phục dữ liệu gốc.
+   */
+  function normalizeShiftTime(v){
+    if(v == null || v === '') return '';
+    var s = String(v).trim();
+    if(!s) return '';
+    // Đã đúng định dạng HH:mm hoặc HH:mm:ss
+    var m = s.match(/^(\d{1,2}):(\d{2})(:\d{2})?$/);
+    if(m) return ('0'+m[1]).slice(-2) + ':' + m[2];
+    // Trích HH:mm bất kỳ trong chuỗi (áp dụng cho Date.toString(), ISO, ...)
+    var m2 = s.match(/(\d{1,2}):(\d{2})/);
+    if(m2) return ('0'+m2[1]).slice(-2) + ':' + m2[2];
+    return '';
+  }
+
+  function toast(msg, isErr){
+    var el = document.createElement('div');
+    el.className = 'toast' + (isErr ? ' err' : '');
+    el.textContent = msg;
+    $('toasts').appendChild(el);
+    setTimeout(function(){ el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(function(){ el.remove(); }, 300); }, isErr ? 5000 : 3000);
+  }
+  function overlay(on){ $('overlay').classList.toggle('show', !!on); }
+
+  var _confirmCb = null;
+  function confirmDialog(msg, onOk, opts){
+    opts = opts || {};
+    $('confirmTitle').textContent = opts.title || 'Xác nhận';
+    if(opts.html){ $('confirmMsg').innerHTML = msg; }
+    else { $('confirmMsg').textContent = msg; }
+    $('confirmOk').textContent = opts.okText || 'Xác nhận';
+    $('confirmOk').classList.toggle('btn-danger', !!opts.danger);
+    _confirmCb = onOk;
+    $('confirmModal').style.display = 'flex';
+  }
+  function closeConfirm(){ $('confirmModal').style.display = 'none'; _confirmCb = null; }
+
+  /* Bộ xử lý lỗi chung cho mọi google.script.run (không nuốt lỗi) */
+  function onFailure(err){
+    overlay(false);
+    setBtnLoading(false);
+    toast('Lỗi kết nối máy chủ: ' + (err && err.message ? err.message : err), true);
+    console.error(err);
+  }
+
+  /* ----------------- Kênh ----------------- */
+  function loadChannels(){
+    google.script.run
+      .withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Không tải được kênh.', true); return; }
+        state.channels = res.data || [];
+        renderChannelList();
+        renderChannelOptions();
+        renderAll();
+        if(PERM.manageUsers) refreshUserFormOptions();
+        maybeShowChannelSetup();
+      })
+      .withFailureHandler(onFailure)
+      .getChannels(AUTH.token);
+  }
+
+  function renderChannelOptions(){
+    var optsForm = '<option value="">— Chọn kênh —</option>' +
+      state.channels.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join('');
+    var curForm = $('f_channel').value;
+    $('f_channel').innerHTML = optsForm;
+    if(state.channels.indexOf(curForm) >= 0) $('f_channel').value = curForm;
+    if($('ci_channel')){
+      var curCi = $('ci_channel').value;
+      $('ci_channel').innerHTML = optsForm;
+      if(state.channels.indexOf(curCi) >= 0) $('ci_channel').value = curCi;
+    }
+
+    var curFil = $('filterChannel').value;
+    $('filterChannel').innerHTML = '<option value="">Tất cả kênh</option>' +
+      state.channels.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join('');
+    if(state.channels.indexOf(curFil) >= 0) $('filterChannel').value = curFil;
+  }
+
+  function renderChannelList(){
+    var el = $('channelList');
+    if($('channelCount')) $('channelCount').textContent = state.channels.length ? state.channels.length : '';
+    if(!state.channels.length){ el.innerHTML = '<span class="staff-empty">Chưa có kênh nào.</span>'; return; }
+    el.innerHTML = state.channels.map(function(n){
+      return '<span class="staff-chip"><span class="dot" style="background:'+channelColor(n)+';margin-right:2px"></span>'+esc(n)+'<button data-chan="'+esc(n)+'" title="Xoá">✕</button></span>';
+    }).join('');
+    Array.prototype.forEach.call(el.querySelectorAll('[data-chan]'), function(b){
+      b.onclick = function(){ removeChannel(b.getAttribute('data-chan')); };
+    });
+  }
+
+  function addChannelUI(){
+    var name = $('c_name').value.trim();
+    if(!name){ toast('Nhập tên kênh cần thêm.', true); return; }
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Thêm kênh thất bại.', true); return; }
+        toast('Đã thêm kênh.');
+        $('c_name').value = '';
+        loadChannels();
+      })
+      .withFailureHandler(onFailure)
+      .addChannel(AUTH.token, name);
+  }
+
+  function removeChannel(name){
+    confirmDialog('Xoá kênh "'+name+'" khỏi danh sách?\n(Các ca đã ghi nhận vẫn được giữ nguyên.)', function(){
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Xoá kênh thất bại.', true); return; }
+        toast('Đã xoá kênh.');
+        loadChannels();
+      })
+      .withFailureHandler(onFailure)
+      .deleteChannel(AUTH.token, name);
+    }, {danger:true, okText:'Xoá'});
+  }
+
+  /* ----------------- Nhân sự ----------------- */
+  function loadStaff(){
+    google.script.run
+      .withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Không tải được nhân sự.', true); return; }
+        state.staff = res.data || [];
+        state.staffFull = res.full || state.staff.map(function(n){ return {name:n, code:''}; });
+        renderStaffList();
+        if($('tab-payroll') && $('tab-payroll').style.display!=='none' && typeof renderCfgHourly==='function'){ renderCfgHourly(); renderCfgMoc(); }
+        renderNameOptions();
+        if(PERM.manageUsers) refreshUserFormOptions();
+      })
+      .withFailureHandler(onFailure)
+      .getStaff(AUTH.token);
+  }
+
+  function addStaffUI(){
+    var name = $('s_name').value.trim();
+    var code = $('s_code') ? $('s_code').value.trim() : '';
+    if(!name){ toast('Nhập tên nhân sự cần thêm.', true); return; }
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Thêm thất bại.', true); return; }
+        toast('Đã thêm nhân sự "'+((res && res.name) || name)+'".');
+        $('s_name').value = '';
+        if($('s_code')) $('s_code').value = '';
+        loadStaff();
+      })
+      .withFailureHandler(onFailure)
+      .addStaff(AUTH.token, name, code);
+  }
+
+  function removeStaff(name){
+    confirmDialog('Xoá nhân sự "'+name+'" khỏi danh sách?\n(Các ca live đã ghi nhận vẫn được giữ nguyên.)', function(){
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Xoá thất bại.', true); return; }
+        toast('Đã xoá nhân sự.');
+        loadStaff();
+      })
+      .withFailureHandler(onFailure)
+      .deleteStaff(AUTH.token, name);
+    }, {danger:true, okText:'Xoá'});
+  }
+
+  /* ----------------- Đọc dữ liệu ----------------- */
+  function loadShifts(){
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Không tải được dữ liệu.', true); return; }
+        // FIX: Chuẩn hoá start/end về "HH:mm" cho mọi ca (chống Date object từ sheet).
+        // Với ca đã đóng mà hours = 0 do dữ liệu cũ sai, tính lại từ start/end đã chuẩn.
+        state.records = (res.data || []).map(function(r){
+          r.start = normalizeShiftTime(r.start);
+          r.end = normalizeShiftTime(r.end);
+          if(!r.open && r.start && r.end && (!r.hours || r.hours === 0)){
+            r.hours = calcHours(r.start, r.end);
+          }
+          return r;
+        });
+        state.recVer = (state.recVer||0) + 1;
+        invalidatePayCache();
+        renderAll();
+        if(PERM.checkInFlow) renderCheckCard();
+        if($('tab-overview').style.display !== 'none') renderOverview();
+        if($('tab-payroll').style.display !== 'none') calcPayroll();
+        loadRequests();
+      })
+      .withFailureHandler(onFailure)
+      .getShifts(AUTH.token);
+  }
+
+  /* ----------------- YÊU CẦU SỬA CA ----------------- */
+  function loadRequests(){
+    google.script.run
+      .withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res || !res.success){ return; }
+        state.requests = res.data || [];
+        renderApprovals();
+        renderMyRequests();
+        renderHistory(); // cập nhật badge "Chờ duyệt"
+      })
+      .withFailureHandler(function(){})
+      .listRequests(AUTH.token);
+  }
+  // Map: mã ca -> yêu cầu đang chờ duyệt (để hiện badge)
+  function pendingReqByShift(){
+    var m = {};
+    (state.requests||[]).forEach(function(q){ if(q.status==='cho_duyet') m[q.shiftId] = q; });
+    return m;
+  }
+  function reqDiffHTML(q){
+    var rows = [];
+    if(q.startNew !== q.startOld) rows.push(diffRow_('Giờ bắt đầu', q.startOld||'(chưa có)', q.startNew||'(chưa có)'));
+    if(q.endNew !== q.endOld) rows.push(diffRow_('Giờ kết thúc', q.endOld||'(chưa có)', q.endNew));
+    if(q.positionNew && q.positionNew !== q.positionOld) rows.push(diffRow_('Vị trí', q.positionOld||'(chưa có)', q.positionNew));
+    if(q.channelNew && q.channelNew !== q.channelOld) rows.push(diffRow_('Kênh', q.channelOld||'(chưa có)', q.channelNew));
+    if(q.gmvStartNew !== q.gmvStartOld) rows.push(diffRow_('GMV đầu ca', fmtVND(q.gmvStartOld)+'đ', fmtVND(q.gmvStartNew)+'đ'));
+    if(q.gmvEndNew !== q.gmvEndOld) rows.push(diffRow_('GMV cuối ca', fmtVND(q.gmvEndOld)+'đ', fmtVND(q.gmvEndNew)+'đ'));
+    if(q.noteNew !== q.noteOld) rows.push(diffRow_('Ghi chú', q.noteOld||'(trống)', q.noteNew||'(trống)'));
+    if(!rows.length) return '<div class="req-diff"><div class="req-diff-empty">Không có thay đổi nào được ghi nhận.</div></div>';
+    return '<div class="req-changes-title">Thay đổi đề xuất</div><div class="req-diff">'+rows.join('')+'</div>';
+  }
+  function diffRow_(label, oldV, newV){
+    return '<div class="req-diff-row"><span class="req-diff-lbl">'+esc(label)+'</span>'
+      + '<span class="req-old">'+esc(oldV)+'</span>'
+      + '<span class="req-arrow">→</span>'
+      + '<span class="req-new">'+esc(newV)+'</span></div>';
+  }
+
+  /** Hiển thị đầy đủ thông tin ca live hiện tại (trước khi duyệt), để người duyệt thấy toàn bộ bối cảnh
+   *  chứ không chỉ riêng trường bị thay đổi. Dùng data q.shift (join sẵn từ backend listRequests). */
+  function reqShiftCtxHTML(q){
+    var s = q.shift;
+    if(!s) return '';
+    var noteRow = s.note
+      ? '<div class="req-shift-ctx-note"><span class="k">Ghi chú hiện tại</span><span class="v">'+esc(s.note)+'</span></div>'
+      : '';
+    return '<div class="req-shift-ctx">'
+      + '<div class="req-shift-ctx-title">Thông tin ca hiện tại</div>'
+      + '<div class="req-shift-ctx-grid">'
+        + '<div><span class="k">Ngày</span><span class="v">'+esc(fmtDate(s.date))+'</span></div>'
+        + '<div><span class="k">Vị trí</span><span class="v">'+esc(s.position)+'</span></div>'
+        + '<div><span class="k">Kênh</span><span class="v">'+esc(s.channel)+'</span></div>'
+        + '<div><span class="k">Giờ live</span><span class="v">'+esc(s.start)+' – '+esc(s.end||'(đang live)')+'</span></div>'
+        + '<div><span class="k">GMV đầu ca</span><span class="v">'+fmtVND(s.gmvStart)+'đ</span></div>'
+        + '<div><span class="k">GMV cuối ca</span><span class="v">'+fmtVND(s.gmvEnd)+'đ</span></div>'
+        + noteRow
+      + '</div>'
+    + '</div>';
+  }
+
+  // Card duyệt/theo dõi (Owner/Lead duyệt; Lead Live chỉ theo dõi)
+  function renderApprovals(){
+    var card = $('reqApproveCard'); if(!card) return;
+    var pend = (state.requests||[]).filter(function(q){ return q.status==='cho_duyet' && q.canView && !q.mine; });
+    // Badge số đếm trên nút tab "Chấm công"
+    var badge = $('dashTabBadge');
+    if(badge){
+      if(pend.length){ badge.textContent = pend.length; badge.style.display=''; }
+      else badge.style.display='none';
+    }
+    if(!pend.length){ card.style.display='none'; return; }
+    card.style.display='';
+    $('reqApproveCount').textContent = pend.length;
+    var approvable = pend.filter(function(q){ return q.canApprove; });
+    var toolbar = $('reqBulkToolbar');
+    if(toolbar) toolbar.style.display = approvable.length > 1 ? '' : 'none';
+    $('reqApproveList').innerHTML = pend.map(function(q){
+      var actions = q.canApprove
+        ? '<div class="req-acts">'
+            + '<button class="btn-approve" data-approve="'+q.id+'">✓ Duyệt</button>'
+            + '<button class="btn-reject" data-reject="'+q.id+'">✕ Từ chối</button>'
+          + '</div>'
+        : '<div class="req-viewonly">👁 Chỉ theo dõi — chờ Owner/Lead duyệt</div>';
+      var content = '<div class="req-head">'
+          + '<div><b>'+esc(q.requester)+'</b> · <span class="chan"><span class="dot" style="background:'+channelColor(q.channel)+'"></span>'+esc(q.channel)+'</span></div>'
+          + '<div class="req-when">'+esc(fmtDate(q.date))+' · gửi '+esc((q.submittedAt||'').slice(11,16))+'</div>'
+        + '</div>'
+        + reqShiftCtxHTML(q)
+        + reqDiffHTML(q)
+        + actions;
+      if(q.canApprove && approvable.length > 1){
+        return '<div class="req-item" data-rq="'+q.id+'">'
+          + '<div class="req-item-cb">'
+            + '<input type="checkbox" class="req-bulk-cb" value="'+q.id+'">'
+            + '<div class="req-item-body">'+content+'</div>'
+          + '</div>'
+        + '</div>';
+      }
+      return '<div class="req-item" data-rq="'+q.id+'">'+content+'</div>';
+    }).join('');
+    Array.prototype.forEach.call($('reqApproveList').querySelectorAll('[data-approve]'), function(b){ b.onclick=function(){ approveReq(b.getAttribute('data-approve')); }; });
+    Array.prototype.forEach.call($('reqApproveList').querySelectorAll('[data-reject]'),  function(b){ b.onclick=function(){ rejectReq(b.getAttribute('data-reject')); }; });
+    bindReqBulkEvents();
+  }
+
+  /** Toolbar "Chọn tất cả / Duyệt các mục đã chọn" cho danh sách yêu cầu chờ duyệt. */
+  function bindReqBulkEvents(){
+    var toolbar = $('reqBulkToolbar'); if(!toolbar) return;
+    var selectAll = $('reqSelectAll');
+    var countEl = $('reqBulkCount');
+    var btn = $('reqBulkApproveBtn');
+    function getCbs(){ return Array.prototype.slice.call(document.querySelectorAll('.req-bulk-cb')); }
+    function updateCount(){
+      var cbs = getCbs();
+      var checked = cbs.filter(function(c){ return c.checked; });
+      if(countEl) countEl.textContent = checked.length + ' mục đã chọn';
+      if(btn) btn.disabled = checked.length === 0;
+      if(selectAll) selectAll.checked = cbs.length > 0 && checked.length === cbs.length;
+    }
+    getCbs().forEach(function(cb){ cb.onchange = updateCount; });
+    if(selectAll) selectAll.onchange = function(){
+      getCbs().forEach(function(cb){ cb.checked = selectAll.checked; });
+      updateCount();
+    };
+    if(btn) btn.onclick = function(){
+      var ids = getCbs().filter(function(c){ return c.checked; }).map(function(c){ return c.value; });
+      if(!ids.length) return;
+      confirmDialog('Duyệt '+ids.length+' yêu cầu đã chọn? Dữ liệu các ca sẽ được cập nhật.', function(){
+        bulkApproveRequests(ids);
+      });
+    };
+    updateCount();
+  }
+  function bulkApproveRequests(ids){
+    overlay(true);
+    var i = 0, okCount = 0, failCount = 0;
+    function next(){
+      if(i >= ids.length){
+        overlay(false);
+        toast('✓ Đã duyệt '+okCount+'/'+ids.length+' yêu cầu.'+(failCount ? (' Lỗi '+failCount+'.') : ''));
+        loadShifts();
+        return;
+      }
+      var id = ids[i++];
+      google.script.run
+        .withSuccessHandler(function(res){
+          if(authGate(res)) { overlay(false); return; }
+          if(res && res.success) okCount++; else failCount++;
+          next();
+        })
+        .withFailureHandler(function(){ failCount++; next(); })
+        .approveRequest(AUTH.token, id);
+    }
+    next();
+  }
+
+  // Danh sách yêu cầu của tôi (Nhân viên xem trạng thái)
+  function renderMyRequests(){
+    var card = $('myReqCard'); if(!card) return;
+    if(AUTH.role !== 'staff'){ card.style.display='none'; return; }
+    var mine = (state.requests||[]).filter(function(q){ return q.mine; }).slice(0,8);
+    if(!mine.length){ card.style.display='none'; return; }
+    card.style.display='';
+    $('myReqList').innerHTML = mine.map(function(q){
+      var st = q.status==='cho_duyet' ? '<span class="req-badge pending">⏳ Chờ duyệt</span>'
+             : q.status==='da_duyet'  ? '<span class="req-badge ok">✓ Đã duyệt</span>'
+             : '<span class="req-badge no">✕ Bị từ chối</span>';
+      var reason = (q.status==='tu_choi' && q.rejectReason) ? '<div class="req-reason">Lý do: '+esc(q.rejectReason)+'</div>' : '';
+      var ctx = (q.status==='cho_duyet') ? reqShiftCtxHTML(q) : '';
+      return '<div class="myreq-item">'
+        + '<div class="myreq-top"><span>'+esc(fmtDate(q.date))+' · '+esc(q.channel)+'</span>'+st+'</div>'
+        + ctx + reqDiffHTML(q) + reason
+      + '</div>';
+    }).join('');
+  }
+
+  function approveReq(id){
+    confirmDialog('Duyệt yêu cầu này? Dữ liệu ca sẽ được cập nhật.', function(){
+      overlay(true);
+      google.script.run.withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Duyệt thất bại.', true); return; }
+        toast('Đã duyệt yêu cầu.');
+        loadShifts();
+      }).withFailureHandler(onFailure).approveRequest(AUTH.token, id);
+    });
+  }
+  var _rejectId = null;
+  function rejectReq(id){
+    _rejectId = id;
+    if($('rj_reason')) $('rj_reason').value = '';
+    if($('rejectModal')) $('rejectModal').style.display = 'flex';
+    setTimeout(function(){ try{ $('rj_reason').focus(); }catch(e){} }, 50);
+  }
+  function closeRejectModal(){ if($('rejectModal')) $('rejectModal').style.display='none'; _rejectId = null; }
+  function submitReject(){
+    if(!_rejectId) return;
+    var id = _rejectId;
+    var reason = $('rj_reason') ? $('rj_reason').value.trim() : '';
+    closeRejectModal();
+    overlay(true);
+    google.script.run.withSuccessHandler(function(res){
+      overlay(false);
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Từ chối thất bại.', true); return; }
+      toast('Đã từ chối yêu cầu.');
+      loadRequests();
+    }).withFailureHandler(onFailure).rejectRequest(AUTH.token, id, reason);
+  }
+
+  // Mở form yêu cầu sửa (Nhân viên)
+  function openReqForm(shiftId){
+    var r = state.records.filter(function(x){ return x.id===shiftId; })[0];
+    if(!r){ toast('Không tìm thấy ca.', true); return; }
+    $('rq_shiftId').value = shiftId;
+    $('rq_info').innerHTML = esc(fmtDate(r.date)) + ' · ' + esc(r.channel) + ' · ' + esc(r.position);
+    if($('rq_position')) $('rq_position').value = (r.position === 'LA') ? 'LA' : 'Host Live';
+    if($('rq_channel')){
+      var opts = state.channels.map(function(c){ return '<option value="'+esc(c)+'">'+esc(c)+'</option>'; }).join('');
+      $('rq_channel').innerHTML = opts;
+      if(state.channels.indexOf(r.channel) >= 0){
+        $('rq_channel').value = r.channel;
+      } else if(r.channel){
+        $('rq_channel').insertAdjacentHTML('beforeend', '<option value="'+esc(r.channel)+'">'+esc(r.channel)+' (đã xoá)</option>');
+        $('rq_channel').value = r.channel;
+      }
+    }
+    if($('rq_start')) $('rq_start').value = r.start || '';
+    $('rq_end').value = r.open ? '' : (r.end||'');
+    $('rq_gmvStart').value = r.gmvStart ? fmtVND(r.gmvStart) : '';
+    $('rq_gmvEnd').value = r.gmvEnd ? fmtVND(r.gmvEnd) : '';
+    $('rq_note').value = r.note || '';
+    $('reqModal').style.display = 'flex';
+  }
+  function closeReqForm(){ $('reqModal').style.display='none'; }
+  function submitReqForm(){
+    var shiftId = $('rq_shiftId').value;
+    var payload = {
+      position: $('rq_position') ? $('rq_position').value : '',
+      channel: $('rq_channel') ? $('rq_channel').value : '',
+      start: $('rq_start') ? $('rq_start').value.trim() : '',
+      end: $('rq_end').value.trim(),
+      gmvStart: parseVND($('rq_gmvStart').value),
+      gmvEnd: parseVND($('rq_gmvEnd').value),
+      note: $('rq_note').value
+    };
+    $('rq_submit').disabled = true;
+    google.script.run.withSuccessHandler(function(res){
+      $('rq_submit').disabled = false;
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Gửi yêu cầu thất bại.', true); return; }
+      toast('Đã gửi yêu cầu, chờ cấp trên duyệt.');
+      closeReqForm();
+      loadRequests();
+    }).withFailureHandler(function(e){ $('rq_submit').disabled=false; onFailure(e); }).submitEditRequest(AUTH.token, shiftId, payload);
+  }
+
+  /* ----------------- Lưu (thêm/sửa) ----------------- */
+  function submitForm(){
+    var name;
+    if(PERM.lockName){
+      name = AUTH.staff;                              // Nhân viên: tên cố định
+    } else {
+      var nameSel = $('f_nameSelect').value;
+      name = (nameSel === '__new__') ? $('f_nameNew').value.trim() : nameSel;
+    }
+    var gmvStart = parseVND($('f_gmvStart').value);
+    var gmvEnd = parseVND($('f_gmvEnd').value);
+    var rec = {
+      date: $('f_date').value,
+      name: name,
+      position: $('f_position').value,
+      channel: $('f_channel').value,
+      start: $('f_start').value,
+      end: $('f_end').value,
+      gmvStart: gmvStart,
+      gmvEnd: gmvEnd,
+      note: $('f_note').value.trim()
+    };
+    if(!rec.name){
+      toast('Vui lòng chọn nhân sự, hoặc chọn "Nhân sự mới" và nhập tên.', true);
+      return;
+    }
+    if(!rec.date || !rec.start || !rec.end){
+      toast('Vui lòng nhập đủ: ngày, giờ bắt đầu và kết thúc.', true);
+      return;
+    }
+    if(!rec.channel){
+      toast('Vui lòng chọn kênh.', true);
+      return;
+    }
+    if(gmvEnd < gmvStart){
+      toast('GMV cuối ca phải ≥ GMV đầu ca. Kiểm tra lại số liệu.', true);
+      return;
+    }
+
+    setBtnLoading(true);
+    var handler = function(res){
+      setBtnLoading(false);
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Lưu thất bại.', true); return; }
+      toast(state.editingId ? 'Đã cập nhật ca live.' : 'Đã lưu ca live.');
+      resetForm();
+      loadShifts();
+      loadStaff();
+    };
+
+    if(state.editingId){
+      google.script.run.withSuccessHandler(handler).withFailureHandler(onFailure)
+        .updateShift(AUTH.token, state.editingId, rec);
+    } else {
+      google.script.run.withSuccessHandler(handler).withFailureHandler(onFailure)
+        .addShift(AUTH.token, rec);
+    }
+  }
+
+  /* ----------------- Sửa ----------------- */
+  function startEdit(id){
+    var r = state.records.filter(function(x){ return x.id===id; })[0];
+    if(!r) return;
+    state.editingId = id;
+    // FIX: Owner/Lead có PERM.showForm=false nên form khai báo mặc định BỊ ẨN.
+    // Khi bấm ✎ Sửa, cần MỞ form ra để populate + cho user chỉnh, nếu không sẽ tưởng như nút không hoạt động.
+    $('manualFormCard').style.display = '';
+    $('colForm').style.display = '';
+    $('grid-dashboard').classList.remove('noform');
+
+    $('f_date').value = r.date;
+    renderNameOptions();
+    var sel = $('f_nameSelect');
+    var exists = Array.prototype.some.call(sel.options, function(o){ return o.value === r.name; });
+    if(exists){
+      sel.value = r.name;
+      $('f_nameNew').style.display = 'none';
+    } else {
+      sel.value = '__new__';
+      $('f_nameNew').style.display = 'block';
+      $('f_nameNew').value = r.name;
+    }
+    $('f_position').value = r.position;
+    if(r.channel && state.channels.indexOf(r.channel) < 0){
+      $('f_channel').insertAdjacentHTML('beforeend', '<option value="'+esc(r.channel)+'">'+esc(r.channel)+' (đã xoá)</option>');
+    }
+    $('f_channel').value = r.channel;
+    $('f_start').value = r.start;
+    $('f_end').value = r.end;
+    // Dữ liệu mới có GMV đầu/cuối; bản ghi cũ chỉ có GMV tổng -> đưa vào ô cuối để không mất.
+    if(r.gmvStart || r.gmvEnd){
+      $('f_gmvStart').value = r.gmvStart ? fmtVND(r.gmvStart) : '';
+      $('f_gmvEnd').value = r.gmvEnd ? fmtVND(r.gmvEnd) : '';
+    } else {
+      $('f_gmvStart').value = '';
+      $('f_gmvEnd').value = r.gmv ? fmtVND(r.gmv) : '';
+    }
+    $('f_note').value = r.note;
+    document.body.classList.add('editing');
+    $('saveLabel').textContent = 'Cập nhật ca';
+    updateDuration();
+    updateGmv();
+    $('f_nameSelect').scrollIntoView({behavior:'smooth', block:'center'});
+  }
+  function resetForm(){
+    state.editingId = null;
+    document.body.classList.remove('editing');
+    $('saveLabel').textContent = 'Lưu ca làm';
+    $('f_nameSelect').value = '';
+    $('f_nameNew').value = '';
+    $('f_nameNew').style.display = 'none';
+    $('f_start').value=''; $('f_end').value='';
+    $('f_gmvStart').value=''; $('f_gmvEnd').value=''; $('f_note').value='';
+    updateDuration();
+    updateGmv();
+    // FIX: Ẩn form lại nếu vai trò không dùng form thường xuyên (Owner/Lead — chỉ mở khi Sửa).
+    // Nếu cũng không có check-in flow (Staff mới cần) thì ẩn luôn cột trái.
+    if(!PERM.showForm){
+      $('manualFormCard').style.display = 'none';
+      if(!PERM.checkInFlow){
+        $('colForm').style.display = 'none';
+        $('grid-dashboard').classList.add('noform');
+      }
+    }
+  }
+
+  /* ----------------- Xoá ----------------- */
+  function removeShift(id){
+    confirmDialog('Xoá ca live này khỏi dữ liệu?', function(){
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Xoá thất bại.', true); return; }
+        toast('Đã xoá ca live.');
+        if(state.editingId === id) resetForm();
+        loadShifts();
+      })
+      .withFailureHandler(onFailure)
+      .deleteShift(AUTH.token, id);
+    }, {danger:true, okText:'Xoá'});
+  }
+
+  /* ----------------- Render ----------------- */
+  function renderAll(){ renderSummary(); renderLiveNow(); renderApprovals(); renderMyRequests(); renderHistory(); renderBreakdown(); }
+
+  // ── PANEL "ĐANG LIVE" ────────────────────────────────────────────
+  // Thời gian đã live tính từ giờ bắt đầu ca tới hiện tại.
+  function elapsedSince(dateIso, startStr){
+    try{
+      var p = String(dateIso).split('-'), t = String(startStr).split(':');
+      var d = new Date(Number(p[0]), Number(p[1])-1, Number(p[2]), Number(t[0])||0, Number(t[1])||0);
+      var mins = Math.floor((Date.now() - d.getTime())/60000);
+      if(mins < 0) mins = 0;
+      var h = Math.floor(mins/60), m = mins%60;
+      return h>0 ? (h+'h'+('0'+m).slice(-2)) : (m+'m');
+    }catch(e){ return ''; }
+  }
+  function renderLiveNow(){
+    var el = $('liveNow'); if(!el) return;
+    var open = state.records.filter(function(r){ return r.open; });
+    if(!open.length){
+      el.innerHTML = '<div class="live-empty">Hiện không có kênh nào đang live.</div>';
+      return;
+    }
+    var byChan = {}, order = [];
+    open.forEach(function(r){
+      var c = String(r.channel).trim();
+      if(!byChan[c]){ byChan[c] = []; order.push(c); }
+      byChan[c].push(r);
+    });
+    order.sort();
+    el.innerHTML = order.map(function(c){
+      var people = byChan[c].slice().sort(function(a,b){
+        // Host Live lên trước, rồi theo giờ bắt đầu
+        var ha = (a.position==='Host Live')?0:1, hb = (b.position==='Host Live')?0:1;
+        return ha-hb || String(a.start).localeCompare(String(b.start));
+      });
+      var ppl = people.map(function(r){
+        var posCls = (r.position==='Host Live') ? 'host' : 'la';
+        return '<div class="live-person">'
+          + '<span class="pill '+posCls+'">'+esc(r.position)+'</span>'
+          + '<span class="live-name">'+esc(r.name)+'</span>'
+          + '<span class="live-meta">'
+            + '<span class="live-checkin">🕐 '+esc(r.start)+'</span>'
+            + '<span class="live-elapsed">⏱ '+elapsedSince(r.date, r.start)+'</span>'
+          + '</span>'
+          + '</div>';
+      }).join('');
+      return '<div class="live-card">'
+        + '<div class="live-card-head">'
+          + '<span class="chan"><span class="dot" style="background:'+channelColor(c)+'"></span>'+esc(c)+'</span>'
+          + '<span class="live-count">'+people.length+' người</span>'
+        + '</div>'
+        + ppl
+        + '</div>';
+    }).join('');
+  }
+
+  // ── LỊCH SỬ CA LIVE — gom Ngày → Kênh, dạng thẻ ──────────────────
+  function fmtDateLong(iso){
+    var p = String(iso).split('-');
+    if(p.length !== 3) return fmtDate(iso);
+    var wd = '';
+    try{
+      var dObj = new Date(Number(p[0]), Number(p[1])-1, Number(p[2]));
+      var names = ['Chủ Nhật','Thứ Hai','Thứ Ba','Thứ Tư','Thứ Năm','Thứ Sáu','Thứ Bảy'];
+      if(!isNaN(dObj.getTime())) wd = names[dObj.getDay()] + ', ';
+    }catch(e){}
+    return wd + p[2].slice(0,2) + '/' + p[1];
+  }
+  function shiftItemHTML(r, showActions, pend){
+    // SAFETY NET: normalize start/end mỗi lần render — đề phòng state.records chưa được normalize
+    // (VD chưa deploy, hoặc dữ liệu bị corrupt từ approveRequest). Đồng thời tự-sửa r để lần sau OK.
+    var startD = normalizeShiftTime(r.start);
+    var endD = normalizeShiftTime(r.end);
+    var hoursD = r.hours;
+    if(startD !== r.start){ r.start = startD; }
+    if(endD !== r.end){ r.end = endD; }
+    if(!r.open && startD && endD && (!hoursD || hoursD === 0)){
+      hoursD = calcHours(startD, endD);
+      r.hours = hoursD;
+    }
+    var posCls = (r.position==='Host Live') ? 'host' : 'la';
+    var timeCell = r.open
+      ? esc(startD)+' – <span class="badge-live">đang live</span>'
+      : esc(startD)+' – '+esc(endD)+(toMin(endD)<=toMin(startD)?' <span class="plus1d">+1d</span>':'');
+    var photoBtn = (r.hasStartPhoto || r.hasEndPhoto)
+      ? '<button class="act" title="Xem ảnh chấm công" data-photo="'+r.id+'" data-ps="'+(r.hasStartPhoto?1:0)+'" data-pe="'+(r.hasEndPhoto?1:0)+'">📷</button>' : '';
+    var acts = (showActions && PERM.canEdit ? '<button class="act" title="Sửa" data-edit="'+r.id+'">✎</button>' : '')
+             + (showActions && PERM.canDel ? '<button class="act del" title="Xoá" data-del="'+r.id+'">✕</button>' : '');
+    // Nhân viên: nút "Yêu cầu sửa" cho ca của chính mình (hoặc badge nếu đang chờ duyệt)
+    var isMine = (AUTH.role==='staff') && (String(r.name).toLowerCase() === String(AUTH.staff).toLowerCase());
+    var reqHtml = '';
+    if(isMine){
+      if(pend && pend[r.id]) reqHtml = '<span class="req-badge pending">⏳ Chờ duyệt</span>';
+      else reqHtml = '<button class="act act-req" title="Yêu cầu sửa" data-req="'+r.id+'">✎ Yêu cầu sửa</button>';
+    }
+    return '<div class="hist-item'+(r.open?' is-open':'')+'">'
+      + '<div class="hi-top">'
+        + '<span class="pill '+posCls+'">'+esc(r.position)+'</span>'
+        + '<span class="hi-name">'+esc(r.name)+'</span>'
+        + (photoBtn+acts ? '<span class="hi-acts">'+photoBtn+acts+'</span>' : '')
+      + '</div>'
+      + '<div class="hi-meta">'
+        + '<span class="hi-time">'+timeCell+'</span>'
+        + '<span class="hi-dur">'+(r.open?'':('· '+fmtDur(hoursD)))+'</span>'
+        + '<span class="hi-gmv">'+(r.open?'':(fmtVND(r.gmv)+'đ'))+'</span>'
+      + '</div>'
+      + (reqHtml ? '<div class="hi-req">'+reqHtml+'</div>' : '')
+      + '</div>';
+  }
+  function renderHistory(){
+    var rows = getFiltered(); // đã sort giảm dần theo ngày+giờ
+    $('emptyState').style.display = rows.length ? 'none' : 'block';
+    var el = $('historyList'); if(!el) return;
+    if(!rows.length){ el.innerHTML = ''; return; }
+    var showActions = PERM.canEdit || PERM.canDel;
+    var pend = pendingReqByShift();
+
+    // gom theo ngày (giữ thứ tự giảm dần sẵn có)
+    var byDate = {}, dateOrder = [];
+    rows.forEach(function(r){ if(!byDate[r.date]){ byDate[r.date]=[]; dateOrder.push(r.date); } byDate[r.date].push(r); });
+
+    // TỐI ƯU: chỉ vẽ N ngày gần nhất (mặc định 14), bấm "Xem thêm" để vẽ tiếp — tránh vẽ hàng nghìn thẻ làm chậm cả app
+    var totalDays = dateOrder.length;
+    var limit = state.histDays || 14;
+    if(totalDays > limit) dateOrder = dateOrder.slice(0, limit);
+
+    el.innerHTML = dateOrder.map(function(d){
+      var dayRows = byDate[d];
+      var dayGmv = dayRows.reduce(function(s,r){ return s + (r.open?0:(Number(r.gmv)||0)); }, 0);
+      var dt = dayType(d);
+      var dayBadge = (dt && dt.short) ? ' <span class="day-tag day-'+dt.key+'">'+dt.short+'</span>' : '';
+
+      // gom tiếp theo kênh
+      var byChan = {}, chanOrder = [];
+      dayRows.forEach(function(r){ var c=String(r.channel).trim(); if(!byChan[c]){byChan[c]=[];chanOrder.push(c);} byChan[c].push(r); });
+      chanOrder.sort();
+
+      var chanBlocks = chanOrder.map(function(c){
+        var crows = byChan[c];
+        var cGmv = crows.reduce(function(s,r){ return s+(r.open?0:(Number(r.gmv)||0)); }, 0);
+        var items = crows.map(function(r){ return shiftItemHTML(r, showActions, pend); }).join('');
+        return '<div class="hist-chan">'
+          + '<div class="hist-chan-head">'
+            + '<span class="chan"><span class="dot" style="background:'+channelColor(c)+'"></span>'+esc(c)
+              + ' <span class="hist-chan-n">('+crows.length+')</span></span>'
+            + '<span class="hist-chan-gmv">'+fmtVND(cGmv)+'đ</span>'
+          + '</div>'
+          + '<div class="hist-items">'+items+'</div>'
+        + '</div>';
+      }).join('');
+
+      return '<div class="hist-day">'
+        + '<div class="hist-day-head">'
+          + '<div class="hist-day-date">'+fmtDateLong(d)+dayBadge+'</div>'
+          + '<div class="hist-day-gmv">'+fmtVND(dayGmv)+'đ</div>'
+        + '</div>'
+        + chanBlocks
+      + '</div>';
+    }).join('') + (totalDays > limit
+      ? '<div style="text-align:center;margin:14px 0 4px"><button type="button" class="btn-ghost" id="histMoreBtn">Xem thêm 14 ngày nữa (còn '+(totalDays-limit)+' ngày)</button></div>'
+      : '');
+    if($('histMoreBtn')) $('histMoreBtn').onclick = function(){ state.histDays = limit + 14; renderHistory(); };
+
+    // gắn lại sự kiện cho nút sửa/xoá/ảnh/yêu cầu
+    Array.prototype.forEach.call(el.querySelectorAll('[data-edit]'), function(b){ b.onclick = function(){ startEdit(b.getAttribute('data-edit')); }; });
+    Array.prototype.forEach.call(el.querySelectorAll('[data-del]'),  function(b){ b.onclick = function(){ removeShift(b.getAttribute('data-del')); }; });
+    Array.prototype.forEach.call(el.querySelectorAll('[data-photo]'),function(b){ b.onclick = function(){ viewPhotos(b.getAttribute('data-photo'), b.getAttribute('data-ps')==='1', b.getAttribute('data-pe')==='1'); }; });
+    Array.prototype.forEach.call(el.querySelectorAll('[data-req]'),  function(b){ b.onclick = function(){ openReqForm(b.getAttribute('data-req')); }; });
+  }
+
+  // Kiểm tra 1 ngày có nằm trong kỳ không (dùng chung cho mọi tab).
+  function dateInPeriod(dateStr, period, fromStr, toStr){
+    if(period === 'all') return true;
+    var now = new Date(); now.setHours(0,0,0,0);
+    var d = new Date(dateStr + 'T00:00:00');
+    if(period === 'today') return dateStr === now.toISOString().slice(0,10);
+    if(period === 'week'){ var s = new Date(now); s.setDate(now.getDate() - ((now.getDay()+6)%7)); return d >= s; }
+    if(period === 'month') return dateStr.slice(0,7) === now.toISOString().slice(0,7);
+    if(period === 'custom'){
+      var ok = true;
+      if(fromStr) ok = ok && dateStr >= fromStr;
+      if(toStr)   ok = ok && dateStr <= toStr;
+      return ok;
+    }
+    return true;
+  }
+  function inPeriod(dateStr){
+    return dateInPeriod(dateStr, $('filterPeriod').value, $('filterFrom').value, $('filterTo').value);
+  }
+  // Lọc bản ghi cho 1 tab bất kỳ theo kỳ + (tuỳ chọn) kênh.
+  function recordsFor(period, fromStr, toStr, channel){
+    return state.records.filter(function(r){
+      return (!channel || r.channel===channel) && dateInPeriod(r.date, period, fromStr, toStr);
+    });
+  }
+  function getFiltered(){
+    var ch = $('filterChannel').value;
+    var nm = $('filterName').value.trim().toLowerCase();
+    return state.records
+      .filter(function(r){ return (!ch || r.channel===ch) && (!nm || r.name.toLowerCase().indexOf(nm)>=0) && inPeriod(r.date); })
+      .sort(function(a,b){ return (b.date+b.start).localeCompare(a.date+a.start); });
+  }
+
+  // Phạm vi cấp KÊNH: lọc theo kỳ + kênh, BỎ QUA lọc theo tên (doanh số là của cả kênh).
+  function getChannelScope(){
+    var ch = $('filterChannel').value;
+    return state.records.filter(function(r){ return !r.open && (!ch || r.channel===ch) && inPeriod(r.date); });
+  }
+
+  function toMin(t){ var p = String(t).split(':'); return (Number(p[0])||0)*60 + (Number(p[1])||0); }
+  // Khoảng thời gian của ca theo phút; ca qua đêm (kết thúc < bắt đầu) thì +24h.
+  function shiftInterval(r){ var s = toMin(r.start), e = toMin(r.end); if(e <= s) e += 1440; return [s, e]; }
+
+  // Doanh số thật theo kênh+ngày: sắp các lần đọc GMV theo thời gian; mỗi lần con số tụt
+  // xuống = 1 phiên mới (bộ đếm reset). Doanh số = tổng (cao nhất − thấp nhất) mỗi phiên.
+  function channelRevenueByDay(rows){
+    // GMV thật của 1 ngày/kênh = tổng GMV các ca HOST (mỗi ca live tính 1 lần).
+    // Trợ live ghi cùng GMV chỉ để tính công, KHÔNG cộng vào doanh số.
+    var groups = {};
+    rows.forEach(function(r){
+      if(String(r.position).toLowerCase().indexOf('host') < 0) return; // chỉ Host
+      var k = r.channel + '|' + r.date;
+      var g = groups[k] = groups[k] || {revenue:0, sessions:0};
+      g.revenue += Number(r.gmv) || 0;
+      g.sessions += 1;
+    });
+    var out = [];
+    Object.keys(groups).forEach(function(k){
+      var p = k.split('|');
+      out.push({ channel:p[0], date:p[1], revenue:groups[k].revenue, sessions:groups[k].sessions });
+    });
+    return out;
+  }
+
+  // ── XEM THEO GIỜ (khi chọn 1 ngày) ───────────────────────────────
+  // 8 khung 3 tiếng: 0-3, 3-6, 6-9, 9-12, 12-15, 15-18, 18-21, 21-24.
+  var SLOT_SIZE = 3;                 // số giờ mỗi khung
+  var SLOT_COUNT = 24 / SLOT_SIZE;   // = 8 khung
+
+  // Doanh số theo khung giờ: chia đều GMV của mỗi ca HOST theo số phút ca trải qua từng khung.
+  function revenueBySlot(rows){
+    var slots = []; for(var i=0;i<SLOT_COUNT;i++) slots.push(0);
+    rows.forEach(function(r){
+      if(String(r.position).toLowerCase().indexOf('host') < 0) return; // chỉ Host (giống biểu đồ ngày)
+      var gmv = Number(r.gmv) || 0;
+      var s = toMin(r.start), e = toMin(r.end);
+      if(e <= s) e += 1440;          // ca qua đêm: +24h
+      var dur = e - s; if(dur <= 0) return;
+      var rate = gmv / dur;          // GMV trên mỗi phút
+      // Rải từng phút vào khung tương ứng (giờ-trong-ngày = phút mod 1440)
+      for(var m = s; m < e; m++){
+        var hour = Math.floor((m % 1440) / 60);
+        var idx = Math.floor(hour / SLOT_SIZE);
+        slots[idx] += rate;
+      }
+    });
+    return slots; // mảng 8 phần tử = GMV mỗi khung
+  }
+
+  // Có đang xem đúng 1 ngày không? (Hôm nay, hoặc Khoảng tuỳ chọn với từ = đến)
+  function ovIsSingleDay(){
+    var p = $('ovPeriod') ? $('ovPeriod').value : '';
+    if(p === 'today') return true;
+    if(p === 'custom'){
+      var f = $('ovFrom') ? $('ovFrom').value : '';
+      var t = $('ovTo') ? $('ovTo').value : '';
+      if(f && t && f === t) return true;
+    }
+    return false;
+  }
+
+  // Giờ live chính theo kênh+ngày = hợp các khoảng thời gian của Host (không cộng trùng giờ).
+  function channelHoursByDay(rows){
+    var groups = {};
+    rows.forEach(function(r){
+      if(String(r.position).toLowerCase().indexOf('host') < 0) return; // chỉ tính Host
+      var k = r.channel + '|' + r.date;
+      (groups[k] = groups[k] || []).push(shiftInterval(r));
+    });
+    var out = [];
+    Object.keys(groups).forEach(function(k){
+      var ivs = groups[k].sort(function(a,b){ return a[0]-b[0]; });
+      var total = 0, cs = null, ce = null;
+      ivs.forEach(function(iv){
+        if(cs === null){ cs = iv[0]; ce = iv[1]; }
+        else if(iv[0] <= ce){ ce = Math.max(ce, iv[1]); }
+        else { total += (ce - cs); cs = iv[0]; ce = iv[1]; }
+      });
+      if(cs !== null) total += (ce - cs);
+      var p = k.split('|');
+      out.push({ channel:p[0], date:p[1], hours: total/60 });
+    });
+    return out;
+  }
+
+  // Gộp doanh số + giờ live chính về từng kênh (cho thẻ tổng & donut).
+  function channelStats(){ return channelStatsFor(getChannelScope()); }
+  function channelStatsFor(rows){
+    var rev = channelRevenueByDay(rows), hrs = channelHoursByDay(rows);
+    var byChan = {}, multiSession = false, totalRev = 0, totalHours = 0, days = {};
+    rev.forEach(function(d){
+      (byChan[d.channel] = byChan[d.channel] || {rev:0, hours:0}).rev += d.revenue;
+      totalRev += d.revenue; days[d.channel+'|'+d.date] = 1;
+      if(d.sessions > 1) multiSession = true;
+    });
+    hrs.forEach(function(d){
+      (byChan[d.channel] = byChan[d.channel] || {rev:0, hours:0}).hours += d.hours;
+      totalHours += d.hours;
+    });
+    return { byChan:byChan, totalRev:totalRev, totalHours:totalHours, multiSession:multiSession, nChannels:Object.keys(byChan).length };
+  }
+
+  var ICONS = {
+    shifts: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
+    hours:  '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    gmv:    '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+    chan:   '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="13" y="7" width="3" height="10"/></svg>',
+    live:   '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>'
+  };
+
+  function renderSummary(){
+    var rows = getFiltered();
+    var cs = channelStats();
+    var liveChans = {};
+    state.records.forEach(function(r){ if(r.open) liveChans[String(r.channel).trim()] = true; });
+    var nLive = Object.keys(liveChans).length;
+    var cards = [
+      { ico:'live',   cls:'c-live',   val: nLive,                      lbl:'Kênh đang live' },
+      { ico:'shifts', cls:'c-blue',   val: rows.length,                lbl:'Số ca chấm công' },
+      { ico:'hours',  cls:'c-purple', val: fmtHours(cs.totalHours)+'h', lbl:'Giờ live chính' },
+      { ico:'gmv',    cls:'c-mint',   val: fmtVND(cs.totalRev),         lbl:'Doanh số kênh (đ)' },
+      { ico:'chan',   cls:'c-pink',   val: cs.nChannels,               lbl:'Số kênh hoạt động' }
+    ];
+    $('summary').innerHTML = cards.map(function(c){
+      return '<div class="stat '+c.cls+'">'
+        + '<div class="ico">'+ICONS[c.ico]+'</div>'
+        + '<div class="val">'+c.val+'</div>'
+        + '<div class="lbl">'+c.lbl+'</div></div>';
+    }).join('');
+  }
+
+  function renderBreakdown(){
+    var rows = getFiltered();
+    if(!rows.length){ $('breakdown').innerHTML=''; return; }
+
+    var palette = ['#e85fae','#9b6ef0','#45bce6','#f6c66b','#3bd1a6','#f48fb1'];
+
+    // ----- Donut: DOANH SỐ theo kênh (số thật, không tính trùng giờ) -----
+    var cs = channelStats();
+    var ckeys = Object.keys(cs.byChan).sort(function(a,b){ return cs.byChan[b].rev - cs.byChan[a].rev; });
+    var totalRev = cs.totalRev || 1;
+    var stops = [], acc = 0;
+    ckeys.forEach(function(k){
+      var col = channelColor(k);
+      var from = acc/totalRev*100, to = (acc + cs.byChan[k].rev)/totalRev*100;
+      stops.push(col + ' ' + from.toFixed(2) + '% ' + to.toFixed(2) + '%');
+      acc += cs.byChan[k].rev;
+    });
+    var legend = ckeys.map(function(k){
+      return '<div class="lg-row"><span class="dot" style="background:'+channelColor(k)+'"></span>'
+        + '<span class="lg-name">'+esc(k)+'</span>'
+        + '<span class="lg-val">'+fmtVND(cs.byChan[k].rev)+'đ · '+fmtHours(cs.byChan[k].hours)+'h</span></div>';
+    }).join('');
+    var donut = ckeys.length
+      ? '<div class="donut-wrap"><div class="donut" style="background:conic-gradient('+stops.join(',')+')"></div>'
+        + '<div class="donut-legend">'+legend+'</div></div>'
+      : '<div class="lg-row"><span class="lg-name" style="color:var(--text-faint)">Chưa có số liệu GMV.</span></div>';
+    var note = cs.multiSession
+      ? '<p style="font-size:11.5px;color:var(--text-faint);margin-top:12px">* Có ngày gồm nhiều phiên live (GMV reset) — doanh số đã cộng theo từng phiên.</p>'
+      : '';
+
+    // ----- Bars: HIỆU SUẤT nhân sự (GMV ghi nhận để tính thưởng) -----
+    var byName = {};
+    rows.forEach(function(r){
+      (byName[r.name] = byName[r.name] || {h:0,g:0});
+      byName[r.name].h += Number(r.hours)||0; byName[r.name].g += Number(r.gmv)||0;
+    });
+    var nkeys = Object.keys(byName).sort(function(a,b){ return byName[b].g - byName[a].g; });
+    var maxG = Math.max.apply(null, nkeys.map(function(k){ return byName[k].g; }).concat([1]));
+    var nameBars = nkeys.map(function(k, i){
+      var col = palette[i % palette.length];
+      var pct = (byName[k].g/maxG*100).toFixed(0);
+      return '<div class="bd-row"><div class="bd-name"><span class="dot" style="background:'+col+'"></span>'+esc(k)+'</div>'
+        + '<div class="bd-bar"><span style="width:'+pct+'%;background:'+col+'"></span></div>'
+        + '<div class="bd-val">'+fmtVND(byName[k].g)+'đ · '+fmtHours(byName[k].h)+'h</div></div>';
+    }).join('');
+
+    $('breakdown').innerHTML =
+      '<div class="bd-cols">'
+      + '<div><h3>Doanh số theo kênh</h3>' + donut + note + '</div>'
+      + '<div><h3>Hiệu suất nhân sự (thưởng)</h3>' + nameBars + '</div>'
+      + '</div>';
+  }
+
+  function renderNameOptions(){
+    var sel = $('f_nameSelect');
+    var current = sel.value;
+    var names = state.staff.slice();
+    var html = '<option value="">— Chọn nhân sự —</option>';
+    names.forEach(function(n){ html += '<option value="'+esc(n)+'">'+esc(n)+'</option>'; });
+    html += '<option value="__new__">+ Nhân sự mới…</option>';
+    sel.innerHTML = html;
+    if(current && (current === '__new__' || names.indexOf(current) >= 0)) sel.value = current;
+  }
+
+  function renderStaffList(){
+    var el = $('staffList');
+    var full = state.staffFull || [];
+    if($('staffCount')) $('staffCount').textContent = full.length ? full.length : '';
+    if(!full.length){ el.innerHTML = '<span class="staff-empty">Chưa có nhân sự nào.</span>'; return; }
+    var term = $('staffSearch') ? $('staffSearch').value.trim().toLowerCase() : '';
+    var list = full.filter(function(x){
+      if(!term) return true;
+      return (x.name + ' ' + x.code).toLowerCase().indexOf(term) >= 0;
+    });
+    if(!list.length){ el.innerHTML = '<span class="staff-empty">Không tìm thấy nhân sự phù hợp.</span>'; return; }
+    var canMerge = (AUTH.role === 'owner');
+    var canEditCode = (AUTH.role === 'owner');
+    el.innerHTML = list.map(function(x){
+      return '<div class="staff-row">'
+        + '<span class="staff-row-name">'+esc(x.name)+'</span>'
+        + (canEditCode
+            ? '<input type="text" class="staff-row-code" data-name="'+esc(x.name)+'" data-orig="'+esc(x.code||'')+'" value="'+esc(x.code||'')+'" placeholder="Mã NV" spellcheck="false">'
+            : (x.code ? '<span class="staff-code">'+esc(x.code)+'</span>' : ''))
+        + (canMerge ? '<button class="staff-row-merge" data-merge="'+esc(x.name)+'" title="Gộp vào tên khác">🔗</button>' : '')
+        + '<button class="staff-row-del" data-staff="'+esc(x.name)+'" title="Xoá">✕</button>'
+        + '</div>';
+    }).join('');
+    Array.prototype.forEach.call(el.querySelectorAll('[data-staff]'), function(b){
+      b.onclick = function(){ removeStaff(b.getAttribute('data-staff')); };
+    });
+    Array.prototype.forEach.call(el.querySelectorAll('[data-merge]'), function(b){
+      b.onclick = function(){ mergeStaffUI(b.getAttribute('data-merge')); };
+    });
+    // Auto-save mã NV khi blur hoặc Enter
+    Array.prototype.forEach.call(el.querySelectorAll('.staff-row-code'), function(inp){
+      inp.onblur = function(){
+        var newVal = inp.value.trim();
+        var origVal = inp.getAttribute('data-orig') || '';
+        if(newVal === origVal) return;
+        saveStaffCode(inp.getAttribute('data-name'), newVal, origVal);
+      };
+      inp.onkeydown = function(e){ if(e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
+    });
+  }
+
+  /* Lưu Mã NV; nếu trùng mã với NV khác, backend trả về duplicate → hiện dialog xử lý */
+  function saveStaffCode(name, newCode, origCode){
+    google.script.run
+      .withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res || !res.success){
+          toast((res && res.error) || 'Lưu mã thất bại.', true);
+          loadStaff();
+          return;
+        }
+        if(res.duplicate){
+          // Backend chưa ghi mã — hiện dialog cho user chọn cách xử lý
+          showMergeByCodeDialog(name, res.duplicate.otherName, newCode, origCode);
+          return;
+        }
+        toast('✓ Đã cập nhật mã cho '+name);
+        loadStaff();
+      })
+      .withFailureHandler(function(e){ onFailure(e); loadStaff(); })
+      .updateStaffCode(AUTH.token, name, newCode);
+  }
+
+  /* Dialog xử lý trùng mã: 2 nhân sự dùng chung 1 mã — gộp hay giữ riêng? */
+  function showMergeByCodeDialog(newName, existingName, code, origCode){
+    var html = 'Mã <b>'+esc(code)+'</b> đã dùng cho <b>"'+esc(existingName)+'"</b>. Bạn muốn:'
+      + '<div style="margin-top:12px; display:flex; flex-direction:column; gap:4px">'
+      + '<label class="import-radio"><input type="radio" name="mergeChoice" value="merge_keep_existing" checked> <span>🔗 Gộp 2 vào 1 — giữ tên "<b>'+esc(existingName)+'</b>"</span></label>'
+      + '<label class="import-radio"><input type="radio" name="mergeChoice" value="merge_keep_new"> <span>🔗 Gộp 2 vào 1 — giữ tên "<b>'+esc(newName)+'</b>"</span></label>'
+      + '<label class="import-radio"><input type="radio" name="mergeChoice" value="different"> <span>❌ Không — đây là 2 người khác nhau, tôi sẽ đổi mã khác</span></label>'
+      + '</div>';
+    confirmDialog(html, function(){
+      var sel = document.querySelector('input[name="mergeChoice"]:checked');
+      var val = sel ? sel.value : '';
+      if(val === 'different' || !val){
+        toast('Đã huỷ cập nhật mã.');
+        loadStaff();
+        return;
+      }
+      var keepName = (val === 'merge_keep_existing') ? existingName : newName;
+      var dropName = (val === 'merge_keep_existing') ? newName : existingName;
+      overlay(true);
+      google.script.run
+        .withSuccessHandler(function(r){
+          if(!r || !r.success){
+            overlay(false);
+            toast((r && r.error) || 'Gộp thất bại.', true);
+            loadStaff();
+            return;
+          }
+          // Nếu giữ tên mới (existing đã có mã bị xoá theo), gán lại mã cho tên giữ
+          if(val === 'merge_keep_new'){
+            google.script.run
+              .withSuccessHandler(function(r2){
+                overlay(false);
+                if(!r2 || !r2.success){ toast('Đã gộp nhưng lưu mã thất bại.', true); loadStaff(); return; }
+                var c = r.counts || {};
+                toast('✓ Đã gộp "'+dropName+'" vào "'+keepName+'" (mã '+code+')');
+                loadStaff(); loadShifts();
+                if(typeof loadPayrollConfig === 'function') loadPayrollConfig();
+              })
+              .withFailureHandler(function(e){ overlay(false); onFailure(e); })
+              .updateStaffCode(AUTH.token, keepName, code);
+          } else {
+            overlay(false);
+            var c = r.counts || {};
+            toast('✓ Đã gộp "'+dropName+'" vào "'+keepName+'"');
+            loadStaff(); loadShifts();
+            if(typeof loadPayrollConfig === 'function') loadPayrollConfig();
+          }
+        })
+        .withFailureHandler(function(e){ overlay(false); onFailure(e); })
+        .mergeStaff(AUTH.token, dropName, keepName);
+    }, { title: '🔗 Trùng mã nhân viên', okText: 'Xác nhận', html: true });
+  }
+
+  /* GỘP NHÂN SỰ: khi ghi nhầm tên (VD "Nguyễn Minh Thư" thay vì "Nguyễn Thị Minh Thư"),
+     Owner có thể gộp toàn bộ dữ liệu từ tên sai sang tên đúng bằng 1 click. */
+  function mergeStaffUI(oldName){
+    var others = (state.staffFull || []).filter(function(s){ return s.name !== oldName; })
+      .sort(function(a,b){ return a.name.localeCompare(b.name,'vi'); });
+    if(!others.length){ toast('Không có nhân sự khác để gộp vào.', true); return; }
+
+    // Tận dụng fuzzy matching sẵn có để gợi ý tên đúng
+    var suggestions = findSimilarStaff(oldName, others.map(function(s){ return s.name; }));
+    var preselected = (suggestions.length && suggestions[0].score >= 85) ? suggestions[0].name : '';
+
+    var opts = others.map(function(s){
+      var sel = (s.name === preselected) ? ' selected' : '';
+      var badge = '';
+      var match = suggestions.filter(function(x){ return x.name === s.name; })[0];
+      if(match){
+        if(match.score >= 95) badge = ' — chỉ khác dấu';
+        else if(match.score >= 80) badge = ' — rất giống';
+        else if(match.score >= 60) badge = ' — có thể trùng';
+      }
+      return '<option value="'+esc(s.name)+'"'+sel+'>'+esc(s.name)+badge+'</option>';
+    }).join('');
+
+    var html = 'Gộp <b>"'+esc(oldName)+'"</b> vào tên đúng nào?'
+      + '<div style="margin-top:12px"><select id="mergeTarget" style="width:100%; padding:10px 12px; border-radius:8px; border:1.5px solid var(--line); font-size:14px; background:var(--field); color:var(--text)">'
+      + opts
+      + '</select></div>'
+      + '<div style="margin-top:12px; font-size:12.5px; color:var(--text-faint); line-height:1.5">'
+      + 'Sẽ chuyển toàn bộ <b>ca live · đơn giá · mốc thưởng · điểm · account</b> từ "'+esc(oldName)+'" sang tên đích, sau đó xoá "'+esc(oldName)+'" khỏi danh sách.'
+      + '</div>';
+
+    confirmDialog(html, function(){
+      var sel = document.getElementById('mergeTarget');
+      var target = sel ? sel.value : '';
+      if(!target){ toast('Không có tên đích được chọn.', true); return; }
+      overlay(true);
+      google.script.run
+        .withSuccessHandler(function(res){
+          overlay(false);
+          if(authGate(res)) return;
+          if(!res || !res.success){ toast((res && res.error) || 'Gộp thất bại.', true); return; }
+          var c = res.counts || {};
+          var parts = [];
+          if(c.shifts) parts.push(c.shifts+' ca');
+          if(c.hourly) parts.push('đơn giá');
+          if(c.moc) parts.push(c.moc+' mốc');
+          if(c.diem) parts.push(c.diem+' điểm');
+          if(c.users) parts.push(c.users+' account');
+          toast('✓ Đã gộp "'+oldName+'" vào "'+target+'"'+(parts.length?': '+parts.join(' · '):''));
+          loadStaff();
+          loadShifts();
+          if(typeof loadPayrollConfig === 'function') loadPayrollConfig();
+        })
+        .withFailureHandler(function(e){ overlay(false); onFailure(e); })
+        .mergeStaff(AUTH.token, oldName, target);
+    }, { title: '🔗 Gộp nhân sự', okText: 'Gộp', html: true });
+  }
+
+  /* ----------------- Khác ----------------- */
+  function updateDuration(){
+    var s = $('f_start').value, e = $('f_end').value;
+    var txt = fmtDur(calcHours(s, e));
+    if(s && e && toMin(e) <= toMin(s)) txt += '  ·  qua đêm (+1 ngày)';
+    $('durationOut').textContent = txt;
+  }
+  function updateGmv(){
+    var s = parseVND($('f_gmvStart').value), e = parseVND($('f_gmvEnd').value);
+    var d = e - s;
+    $('gmvOut').textContent = (d < 0 ? '−' : '') + fmtVND(Math.abs(d)) + 'đ';
+    $('gmvOut').style.color = (d < 0) ? 'var(--accent)' : '';
+  }
+  function setBtnLoading(on){ $('saveBtn').classList.toggle('loading', !!on); $('saveBtn').disabled = !!on; }
+
+  /* ===================== TỔNG QUAN ===================== */
+  function fillOvChannel(){
+    var sel = $('ovChannel'); if(!sel) return;
+    var cur = sel.value;
+    var opts = '<option value="">Tất cả kênh</option>' +
+      state.channels.map(function(c){ return '<option value="'+esc(c)+'">'+esc(c)+'</option>'; }).join('');
+    if(sel.innerHTML !== opts){ sel.innerHTML = opts; if(state.channels.indexOf(cur)>=0) sel.value = cur; }
+  }
+  function ovRows(){
+    var ch = $('ovChannel') ? $('ovChannel').value : '';
+    var dt = $('ovDayTypeFilter') ? $('ovDayTypeFilter').value : '';
+    return recordsFor($('ovPeriod').value, $('ovFrom').value, $('ovTo').value, '').filter(function(r){
+      if(r.open) return false;
+      if(ch && String(r.channel).trim() !== ch) return false;
+      if(dt){ var k = dayType(r.date); if((k && k.key ? k.key : 'normal') !== dt) return false; }
+      return true;
+    });
+  }
+
+  /** Chỉ vẽ lại Tổng quan khi dữ liệu ca live hoặc bộ lọc đã đổi kể từ lần vẽ trước (chuyển tab qua lại không tốn công tính lại). */
+  function renderOverviewIfStale_(){
+    var sig = [state.recVer||0, state.channels.length,
+      $('ovPeriod') ? $('ovPeriod').value : '', $('ovFrom') ? $('ovFrom').value : '', $('ovTo') ? $('ovTo').value : '',
+      $('ovChannel') ? $('ovChannel').value : '', $('ovDayTypeFilter') ? $('ovDayTypeFilter').value : ''].join('|');
+    if(state.ovSig === sig && $('ovSummary') && $('ovSummary').innerHTML) return;
+    renderOverview();
+    state.ovSig = sig;
+  }
+  function renderOverview(){
+    fillOvChannel();
+    var rows = ovRows();
+    var cs = channelStatsFor(rows);
+    var nDays = {}; rows.forEach(function(r){ nDays[r.channel+'|'+r.date]=1; });
+    var dayset = {}; rows.forEach(function(r){ dayset[r.date]=1; });
+    var numDays = Object.keys(dayset).length || 1;
+    var gmvPerHour = cs.totalHours ? cs.totalRev / cs.totalHours : 0;
+
+    // KPI
+    var cards = [
+      { ico:'gmv',    cls:'c-mint',   val: fmtVND(cs.totalRev),                 lbl:'Doanh số kênh (đ)' },
+      { ico:'hours',  cls:'c-purple', val: fmtHours(cs.totalHours)+'h',         lbl:'Giờ live chính' },
+      { ico:'gmv',    cls:'c-pink',   val: fmtVND(Math.round(gmvPerHour)),      lbl:'GMV / giờ (đ)' },
+      { ico:'shifts', cls:'c-blue',   val: fmtVND(Math.round(cs.totalRev/numDays)), lbl:'Doanh số TB/ngày (đ)' },
+      { ico:'chan',   cls:'c-mint',   val: rows.length,                          lbl:'Số ca chấm công' }
+    ];
+    $('ovSummary').innerHTML = cards.map(function(c){
+      return '<div class="stat '+c.cls+'"><div class="ico">'+ICONS[c.ico]+'</div><div class="val">'+c.val+'</div><div class="lbl">'+c.lbl+'</div></div>';
+    }).join('');
+
+    // Doanh số theo ngày (gộp mọi kênh) — HOẶC theo khung giờ nếu chỉ xem 1 ngày
+    var trendEl = $('ovTrend');
+    var trendTitle = $('ovTrendTitle');
+    if(ovIsSingleDay()){
+      // ── XEM THEO KHUNG GIỜ ──
+      if(trendTitle) trendTitle.textContent = 'Doanh số theo khung giờ (trong ngày)';
+      var slots = revenueBySlot(rows);
+      var maxS = Math.max.apply(null, slots.concat([1]));
+      var hasData = slots.some(function(v){ return v > 0; });
+      if(!hasData){
+        trendEl.innerHTML = '<div class="empty"><div class="big">🕐</div>Chưa có doanh số trong ngày này.</div>';
+      } else {
+        trendEl.innerHTML = '<div class="vbars">' + slots.map(function(v, i){
+          var h = Math.max(3, Math.round(v/maxS*140));
+          var from = i*SLOT_SIZE, to = from + SLOT_SIZE;
+          var lbl = (from<10?'0'+from:from) + '-' + (to<10?'0'+to:to) + 'h';
+          return '<div class="vbar-col">'
+            + '<div class="vbar-val">'+(v>0?fmtShort(v):'')+'</div>'
+            + '<div class="vbar-wrap"><div class="vbar" style="height:'+h+'px" title="'+fmtVND(Math.round(v))+'đ"></div></div>'
+            + '<div class="vbar-lbl">'+lbl+'</div></div>';
+        }).join('') + '</div>';
+      }
+    } else {
+      // ── XEM THEO NGÀY (như cũ) ──
+      if(trendTitle) trendTitle.textContent = 'Doanh số kênh theo ngày';
+      var rev = channelRevenueByDay(rows);
+      var byDate = {};
+      rev.forEach(function(d){ byDate[d.date] = (byDate[d.date]||0) + d.revenue; });
+      var dates = Object.keys(byDate).sort();
+      if(!dates.length){
+        trendEl.innerHTML = '<div class="empty"><div class="big">📊</div>Chưa có doanh số trong kỳ này.</div>';
+      } else {
+        var maxV = Math.max.apply(null, dates.map(function(d){ return byDate[d]; }).concat([1]));
+        trendEl.innerHTML = '<div class="vbars">' + dates.map(function(d){
+          var h = Math.max(3, Math.round(byDate[d]/maxV*140));
+          var dd = d.split('-');
+          return '<div class="vbar-col">'
+            + '<div class="vbar-val">'+fmtShort(byDate[d])+'</div>'
+            + '<div class="vbar-wrap"><div class="vbar" style="height:'+h+'px" title="'+fmtVND(byDate[d])+'đ"></div></div>'
+            + '<div class="vbar-lbl">'+dd[2]+'/'+dd[1]+'</div></div>';
+        }).join('') + '</div>';
+      }
+    }
+
+    // Hiệu quả theo loại ngày Sale (Mega / Mini / Thường)
+    var DT_ORDER = [['mega','Mega Sale'],['mini','Mini Sale'],['normal','Ngày thường']];
+    var byDT = { mega:{n:0,h:0,g:0,days:{}}, mini:{n:0,h:0,g:0,days:{}}, normal:{n:0,h:0,g:0,days:{}} };
+    rows.forEach(function(r){
+      if(String(r.position).toLowerCase().indexOf('host') < 0) return; // chỉ Host = mỗi ca live 1 lần
+      var dt = dayType(r.date); var k = (dt && dt.key) ? dt.key : 'normal';
+      if(!byDT[k]) k = 'normal';
+      byDT[k].n += 1; byDT[k].h += Number(r.hours)||0; byDT[k].g += Number(r.gmv)||0; byDT[k].days[r.date] = 1;
+    });
+    var dtRows = DT_ORDER.filter(function(x){ return byDT[x[0]].n > 0; });
+    $('ovDayType').innerHTML = dtRows.length ? (
+      '<div class="table-scroll"><table><thead><tr>'
+      + '<th>Loại ngày</th><th>Số ngày</th><th>Số ca live</th><th>Giờ live</th><th>Tổng GMV</th><th>GMV/ngày</th><th>GMV/giờ</th>'
+      + '</tr></thead><tbody>'
+      + dtRows.map(function(x){
+          var v = byDT[x[0]]; var nd = Object.keys(v.days).length || 1;
+          var gph = v.h ? v.g/v.h : 0;
+          return '<tr><td><span class="day-tag day-'+x[0]+'">'+x[1]+'</span></td>'
+            + '<td class="num">'+nd+'</td>'
+            + '<td class="num">'+v.n+'</td>'
+            + '<td class="num">'+fmtHours(v.h)+'h</td>'
+            + '<td class="num gmv">'+fmtVND(v.g)+'</td>'
+            + '<td class="num">'+fmtVND(Math.round(v.g/nd))+'</td>'
+            + '<td class="num">'+fmtVND(Math.round(gph))+'</td></tr>';
+        }).join('')
+      + '</tbody></table></div>'
+      + '<p class="hint" style="margin-top:8px;">Mega Sale = ngày trùng tháng (1/1, 2/2…). Mini Sale = ngày 1, 15, 25. GMV tính theo ca Host (mỗi ca live 1 lần, không cộng trùng Trợ live).</p>'
+    ) : '<div class="empty">Chưa có dữ liệu trong kỳ này.</div>';
+
+    // Hiệu suất theo kênh
+    var ckeys = Object.keys(cs.byChan).sort(function(a,b){ return cs.byChan[b].rev - cs.byChan[a].rev; });
+    $('ovChannels').innerHTML = ckeys.length ? (
+      '<div class="table-scroll"><table><thead><tr><th>Kênh</th><th>Doanh số</th><th>Giờ live</th><th>GMV/giờ</th></tr></thead><tbody>'
+      + ckeys.map(function(k){
+          var v = cs.byChan[k]; var gph = v.hours ? v.rev/v.hours : 0;
+          return '<tr><td><span class="chan"><span class="dot" style="background:'+channelColor(k)+'"></span>'+esc(k)+'</span></td>'
+            + '<td class="num gmv">'+fmtVND(v.rev)+'</td><td class="num">'+fmtHours(v.hours)+'h</td>'
+            + '<td class="num">'+fmtVND(Math.round(gph))+'</td></tr>';
+        }).join('')
+      + '</tbody></table></div>') : '<div class="empty">Chưa có dữ liệu kênh.</div>';
+
+    // Chi tiết nhân sự, chia theo từng kênh
+    var byNC = {}, totalByName = {};
+    rows.forEach(function(r){
+      byNC[r.name] = byNC[r.name] || {};
+      var o = byNC[r.name][r.channel] = byNC[r.name][r.channel] || {h:0,g:0};
+      o.h += Number(r.hours)||0; o.g += Number(r.gmv)||0;
+      var t = totalByName[r.name] = totalByName[r.name] || {h:0,g:0};
+      t.h += Number(r.hours)||0; t.g += Number(r.gmv)||0;
+    });
+    var names = Object.keys(byNC).sort(function(a,b){ return totalByName[b].g - totalByName[a].g; });
+    $('ovStaff').innerHTML = names.length ? (
+      '<div class="table-scroll"><table><thead><tr>'
+      + '<th>Nhân sự</th><th>Kênh</th><th>Giờ live</th><th>GMV</th><th>GMV/h</th><th>NMV-VAT</th>'
+      + '</tr></thead><tbody>'
+      + names.map(function(name){
+          var chans = Object.keys(byNC[name]).sort(function(a,b){ return byNC[name][b].g - byNC[name][a].g; });
+          var t = totalByName[name];
+          return chans.map(function(ch, idx){
+            var o = byNC[name][ch];
+            var gph = o.h ? o.g/o.h : 0;
+            var cell0 = (idx === 0)
+              ? '<td rowspan="'+chans.length+'" style="vertical-align:top"><div style="font-weight:600">'+esc(name)+'</div>'
+                + '<div style="font-size:11.5px;color:var(--text-faint)">Tổng: '+fmtHours(t.h)+'h · '+fmtVND(t.g)+'đ</div></td>'
+              : '';
+            return '<tr'+(idx===0?' style="border-top:2px solid var(--line)"':'')+'>'
+              + cell0
+              + '<td><span class="chan"><span class="dot" style="background:'+channelColor(ch)+'"></span>'+esc(ch)+'</span></td>'
+              + '<td class="num">'+fmtHours(o.h)+'h</td>'
+              + '<td class="num gmv">'+fmtVND(o.g)+'</td>'
+              + '<td class="num">'+fmtVND(Math.round(gph))+'</td>'
+              + '<td class="num">'+fmtVND(Math.round(nmvVat(o.g)))+'</td></tr>';
+          }).join('');
+        }).join('')
+      + '</tbody></table></div>') : '<div class="empty">Chưa có dữ liệu nhân sự.</div>';
+  }
+
+  // NMV-VAT = (GMV / 1,08) × 70%
+  function nmvVat(gmv){ return (Number(gmv)||0) / 1.08 * 0.7; }
+
+  // Rút gọn số tiền cho nhãn cột (1,2tr / 950k)
+  function fmtShort(n){
+    n = Number(n)||0;
+    if(n >= 1e9) return (n/1e9).toFixed(1).replace(/\.0$/,'')+'tỷ';
+    if(n >= 1e6) return (n/1e6).toFixed(1).replace(/\.0$/,'')+'tr';
+    if(n >= 1e3) return Math.round(n/1e3)+'k';
+    return String(n);
+  }
+
+  /* ===================== BẢNG LƯƠNG (V2 - KPI) ===================== */
+  function curMonthStr(){ var d=new Date(); return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2); }
+  function fmtThousand(v){ var n = String(v==null?'':v).replace(/\D/g,''); return n.replace(/\B(?=(\d{3})+(?!\d))/g,'.'); }
+  function unfmtNum(v){ return Number(String(v==null?'':v).replace(/\D/g,''))||0; }
+
+  function loadPayroll(){
+    if($('payMonth') && !$('payMonth').value) $('payMonth').value = curMonthStr();
+    if($('fixedMonth') && !$('fixedMonth').value) $('fixedMonth').value = curMonthStr();
+    var ed = PERM.salaryEditable;
+    if($('payConfigTab')) $('payConfigTab').style.display = ed ? '' : 'none';
+    if($('payFixedTab')) $('payFixedTab').style.display = (AUTH.role==='owner') ? '' : 'none';
+    if($('payReturnWrap')) $('payReturnWrap').style.display = ed ? '' : 'none';
+    if($('payCalcBtn')) $('payCalcBtn').style.display = ed ? '' : 'none';
+    if($('payExportBtn')) $('payExportBtn').style.display = ed ? '' : 'none';
+    setPayView('result');
+    renderPayChannelFilterMenu();
+    if(AUTH.role === 'owner') ensureProbationTab_();
+    // TỐI ƯU: trước đây gọi TUẦN TỰ (cấu hình → lương tháng này → lương tháng trước = 3 lượt chờ nối tiếp).
+    // Giờ cả 3 lượt gọi backend chạy SONG SONG — tổng thời gian chờ = lượt chậm nhất, không phải tổng cộng.
+    if(ed){
+      if(!state.staffFull || !state.staffFull.length) loadStaff();
+      // Cấu hình lương ít đổi: chỉ tải lại khi chưa có hoặc đã quá 5 phút (các thao tác lưu cấu hình tự đặt lại)
+      if(!state.payCfgAt || (Date.now() - state.payCfgAt) > 300000) loadPayrollConfig();
+    }
+    var month = $('payMonth') ? $('payMonth').value : '';
+    var c = state.payCache;
+    if(c && month && c.key === payCacheKey_(month)){
+      applyPayCache_(c.d);                                   // hiện NGAY, không chặn màn hình
+      if((Date.now() - c.at) > 20000) calcPayroll({silent:true}); // cũ hơn 20 giây -> làm mới ngầm
+    } else {
+      calcPayroll();
+    }
+  }
+
+  /* ===================== LỌC KÊNH (đa lựa chọn) trong Bảng lương ===================== */
+  // state.payChannelFilter: mảng tên kênh đang lọc; [] = không lọc (xem tất cả kênh trong phạm vi quyền).
+  function payChannelFilterLabel(){
+    var n = (state.payChannelFilter||[]).length;
+    if(!n) return 'Tất cả kênh';
+    if(n === 1) return state.payChannelFilter[0];
+    return n + ' kênh đã chọn';
+  }
+  function renderPayChannelFilterMenu(){
+    var btn = $('payChannelFilterBtn'); var menu = $('payChannelFilterMenu');
+    if(!btn || !menu) return;
+    if(!state.payChannelFilter) state.payChannelFilter = [];
+    btn.innerHTML = esc(payChannelFilterLabel()) + ' <span class="k-caret">▾</span>';
+    var selected = {}; state.payChannelFilter.forEach(function(c){ selected[c] = true; });
+    var itemsHtml = (state.channels||[]).map(function(c){
+      return '<label><input type="checkbox" class="pcf-cb" value="'+esc(c)+'"'+(selected[c]?' checked':'')+'> '+esc(c)+'</label>';
+    }).join('');
+    menu.innerHTML = '<div class="cf-actions">'
+        + '<button type="button" id="pcfSelectAll">Chọn tất cả</button>'
+        + '<button type="button" id="pcfClear">Bỏ lọc</button>'
+      + '</div>'
+      + (itemsHtml || '<div class="hint" style="padding:6px 8px;">Chưa có kênh nào.</div>');
+    Array.prototype.forEach.call(menu.querySelectorAll('.pcf-cb'), function(cb){
+      cb.onchange = function(){
+        var arr = Array.prototype.slice.call(menu.querySelectorAll('.pcf-cb:checked')).map(function(c){ return c.value; });
+        state.payChannelFilter = arr;
+        btn.innerHTML = esc(payChannelFilterLabel()) + ' <span class="k-caret">▾</span>';
+        calcPayroll();
+      };
+    });
+    if($('pcfSelectAll')) $('pcfSelectAll').onclick = function(){
+      Array.prototype.forEach.call(menu.querySelectorAll('.pcf-cb'), function(cb){ cb.checked = true; });
+      state.payChannelFilter = (state.channels||[]).slice();
+      btn.innerHTML = esc(payChannelFilterLabel()) + ' <span class="k-caret">▾</span>';
+      calcPayroll();
+    };
+    if($('pcfClear')) $('pcfClear').onclick = function(){
+      Array.prototype.forEach.call(menu.querySelectorAll('.pcf-cb'), function(cb){ cb.checked = false; });
+      state.payChannelFilter = [];
+      btn.innerHTML = esc(payChannelFilterLabel()) + ' <span class="k-caret">▾</span>';
+      calcPayroll();
+    };
+  }
+
+  function setPayView(v){
+    Array.prototype.forEach.call(document.querySelectorAll('.pay-subtab'), function(b){ b.classList.toggle('active', b.getAttribute('data-payview')===v); });
+    if($('payView-result')) $('payView-result').style.display = (v==='result') ? '' : 'none';
+    if($('payView-fixed')) $('payView-fixed').style.display = (v==='fixed') ? '' : 'none';
+    if($('payView-config')) $('payView-config').style.display = (v==='config') ? '' : 'none';
+    if($('payView-probation')) $('payView-probation').style.display = (v==='probation') ? '' : 'none';
+    if(v==='fixed' && AUTH.role==='owner') renderFixedSalaryMonth();
+    if(v==='probation' && AUTH.role==='owner') renderProbationEditor();
+    if(v==='config' && AUTH.role==='owner') renderHolidayList();
+  }
+
+  /* ===================== NGÀY LỄ — NHÂN LƯƠNG GIỜ (tab Cấu hình, chỉ Owner) =====================
+   * Mỗi dịp lễ nhập: Từ ngày – Đến ngày (bỏ trống = 1 ngày), Hệ số (VD 2, 3), Ghi chú.
+   * Mọi ca live bắt đầu vào các ngày này sẽ được nhân LƯƠNG GIỜ theo hệ số (Host + Trợ live, mọi kênh). Thưởng KPI giữ nguyên. */
+  var HOL_STYLE = 'padding:8px 10px;border-radius:8px;border:1.5px solid var(--line);background:var(--field);color:var(--text);box-sizing:border-box;';
+  function ensureHolidayCard_(){
+    if($('holidayCard')) return;
+    var cfg = $('payView-config'); if(!cfg) return;
+    cfg.insertAdjacentHTML('beforeend',
+      '<div class="card" id="holidayCard" style="display:none">'
+      + '<div class="card-head"><h2>🎉 Ngày lễ — nhân lương giờ</h2></div>'
+      + '<p class="hint" style="margin:0 0 12px;">Mỗi dịp lễ nhập khoảng ngày + <b>hệ số</b> (VD 2 hoặc 3 — tuỳ từng dịp). Ca live <b>bắt đầu</b> vào các ngày này được nhân <b>lương giờ</b> theo hệ số (Host và Trợ live, mọi kênh); thưởng KPI giữ nguyên. Ca qua đêm tính theo ngày bắt đầu ca. Tháng đã chốt cần Mở chốt mới đổi được.</p>'
+      + '<div id="holRows"></div>'
+      + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
+        + '<button class="btn-mini" id="holAddBtn" type="button">+ Thêm ngày lễ</button>'
+        + '<button class="btn" id="holSaveBtn" style="width:auto;padding:10px 18px">💾 Lưu ngày lễ</button>'
+      + '</div></div>');
+    $('holAddBtn').addEventListener('click', function(){
+      $('holRows').insertAdjacentHTML('beforeend', holRowHTML({}));
+      bindHolRows_();
+    });
+    $('holSaveBtn').addEventListener('click', saveHolidaysUI);
+  }
+  function holRowHTML(r){
+    r = r || {};
+    return '<div class="hol-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">'
+      + '<div style="flex:1 1 140px"><label style="display:block;font-size:11.5px;color:var(--text-faint);margin-bottom:3px">Từ ngày</label><input type="date" class="hol-from" value="'+esc(r.from||'')+'" style="width:100%;'+HOL_STYLE+'"></div>'
+      + '<div style="flex:1 1 140px"><label style="display:block;font-size:11.5px;color:var(--text-faint);margin-bottom:3px">Đến ngày (nếu nhiều ngày)</label><input type="date" class="hol-to" value="'+esc(r.to&&r.to!==r.from?r.to:'')+'" style="width:100%;'+HOL_STYLE+'"></div>'
+      + '<div style="flex:0 1 100px"><label style="display:block;font-size:11.5px;color:var(--text-faint);margin-bottom:3px">Hệ số</label><input type="number" class="hol-mult" min="0.1" max="10" step="0.1" value="'+(r.mult||'')+'" placeholder="VD 3" style="width:100%;'+HOL_STYLE+'"></div>'
+      + '<div style="flex:2 1 180px"><label style="display:block;font-size:11.5px;color:var(--text-faint);margin-bottom:3px">Ghi chú</label><input type="text" class="hol-note" value="'+esc(r.note||'')+'" placeholder="VD: Quốc khánh 2/9" style="width:100%;'+HOL_STYLE+'"></div>'
+      + '<button class="btn-mini hol-del" type="button" style="color:var(--pink)">✕</button>'
+      + '</div>';
+  }
+  function bindHolRows_(){
+    var el = $('holRows'); if(!el) return;
+    Array.prototype.forEach.call(el.querySelectorAll('.hol-del'), function(b){
+      b.onclick = function(){ var row = b.closest('.hol-row'); if(row) row.remove(); };
+    });
+  }
+  function holAddDays_(s, n){
+    var p = s.split('-'); var d = new Date(Number(p[0]), Number(p[1])-1, Number(p[2]) + n);
+    return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);
+  }
+  function renderHolidayList(){
+    if(AUTH.role !== 'owner') return;
+    ensureHolidayCard_();
+    var card = $('holidayCard'); if(!card) return;
+    card.style.display = '';
+    google.script.run.withSuccessHandler(function(res){
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Không tải được ngày lễ.', true); return; }
+      // Gộp các ngày liên tiếp cùng hệ số + cùng ghi chú thành 1 dòng khoảng ngày
+      var groups = [];
+      (res.data||[]).forEach(function(h){
+        var last = groups[groups.length-1];
+        if(last && last.mult === h.mult && last.note === h.note && holAddDays_(last.to, 1) === h.date){ last.to = h.date; }
+        else groups.push({ from:h.date, to:h.date, mult:h.mult, note:h.note });
+      });
+      if(!groups.length) groups = [{}];
+      $('holRows').innerHTML = groups.map(holRowHTML).join('');
+      bindHolRows_();
+    }).withFailureHandler(onFailure).getHolidays(AUTH.token);
+  }
+  function saveHolidaysUI(){
+    var items = [], bad = '';
+    Array.prototype.forEach.call($('holRows').querySelectorAll('.hol-row'), function(row){
+      var from = row.querySelector('.hol-from').value;
+      var to = row.querySelector('.hol-to').value || from;
+      var mult = Number(row.querySelector('.hol-mult').value);
+      var note = row.querySelector('.hol-note').value.trim();
+      if(!from && !mult && !note) return; // dòng trống
+      if(!from){ bad = 'Có dòng chưa chọn "Từ ngày".'; return; }
+      if(!(mult > 0)){ bad = 'Ngày '+from+': chưa nhập hệ số.'; return; }
+      if(to < from){ bad = 'Ngày '+from+': "Đến ngày" phải sau "Từ ngày".'; return; }
+      var d = from, guard = 0;
+      while(d <= to && guard < 31){ items.push({ date:d, mult:mult, note:note }); d = holAddDays_(d, 1); guard++; }
+    });
+    if(bad){ toast(bad, true); return; }
+    overlay(true);
+    google.script.run.withSuccessHandler(function(res){
+      overlay(false);
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Lưu thất bại.', true); return; }
+      invalidatePayCache();
+      toast('Đã lưu ngày lễ ('+res.saved+' ngày).');
+      renderHolidayList();
+      if($('payMonth') && $('payMonth').value) calcPayroll();
+    }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).saveHolidays(AUTH.token, items);
+  }
+
+  /* ===================== NHÂN SỰ THỬ VIỆC (nhập tay, không chấm công) =====================
+   * Tab con "Thử việc" trong Bảng lương (chỉ Owner). Mỗi dòng: Tên · Kênh (tuỳ chọn) · Số tiền · Ghi chú.
+   * Lưu theo THÁNG; kết quả tự cộng vào Tổng quỹ lương và xuất Excel (gộp ở cột Lương cứng, ghi chú "Thử việc").
+   * Tab + khung nhập được tạo động bằng JS (không cần sửa Index.html). */
+  function ensureProbationTab_(){
+    if($('payProbationTab')) return;
+    var nav = document.querySelector('.pay-subnav');
+    var fixedView = $('payView-fixed');
+    if(!nav || !fixedView) return;
+    nav.insertAdjacentHTML('beforeend', '<button class="pay-subtab" data-payview="probation" id="payProbationTab">Thử việc</button>');
+    $('payProbationTab').addEventListener('click', function(){ setPayView('probation'); });
+    fixedView.insertAdjacentHTML('afterend',
+      '<div id="payView-probation" style="display:none;">'
+      + '<div class="card">'
+        + '<div class="pay-bar">'
+          + '<div class="field" style="margin:0;"><label>Tháng</label><input type="month" id="probMonth"></div>'
+          + '<button class="btn" id="probSaveBtn" style="align-self:flex-end; width:auto; padding:11px 18px;">💾 Lưu lương thử việc</button>'
+        + '</div>'
+        + '<p class="hint" style="margin:10px 0 0;">Dành cho nhân sự <b>thử việc / làm ngắn hạn, không chấm công</b>. Nhập tên, kênh làm việc, số tiền — hệ thống cộng thẳng vào lương tháng và vào Tổng quỹ lương. Mỗi tháng nhập riêng; bấm Lưu là thay thế toàn bộ các dòng của tháng đó. Tháng đã chốt cần Mở chốt trước.</p>'
+      + '</div>'
+      + '<div class="card" id="probCard" style="margin-top:14px;">'
+        + '<div id="probRows"></div>'
+        + '<div style="display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap;">'
+          + '<button class="btn-mini" id="probAddRowBtn" type="button">+ Thêm dòng</button>'
+          + '<span class="kdim" id="probTotal"></span>'
+        + '</div>'
+      + '</div>'
+      + '</div>');
+    $('probSaveBtn').addEventListener('click', saveProbationUI);
+    $('probAddRowBtn').addEventListener('click', function(){
+      $('probRows').insertAdjacentHTML('beforeend', probRowHTML({}));
+      bindProbRows_();
+    });
+    $('probMonth').addEventListener('change', renderProbationEditor);
+  }
+  var PROB_INPUT_STYLE = 'padding:8px 10px;border-radius:8px;border:1.5px solid var(--line);background:var(--field);color:var(--text);box-sizing:border-box;';
+  function probRowHTML(r){
+    r = r || {};
+    var chanOpts = '<option value="">— Kênh (tuỳ chọn) —</option>' + (state.channels||[]).map(function(c){
+      return '<option value="'+esc(c)+'"'+(c===r.channel?' selected':'')+'>'+esc(c)+'</option>';
+    }).join('');
+    return '<div class="prob-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">'
+      + '<input type="text" class="prob-name" value="'+esc(r.name||'')+'" placeholder="Tên nhân sự thử việc" style="flex:1 1 170px;'+PROB_INPUT_STYLE+'">'
+      + '<select class="prob-chan" style="flex:1 1 150px;'+PROB_INPUT_STYLE+'">'+chanOpts+'</select>'
+      + '<input type="text" inputmode="numeric" class="numfmt prob-amount" value="'+(r.amount?fmtThousand(r.amount):'')+'" placeholder="Số tiền" style="flex:1 1 120px;'+PROB_INPUT_STYLE+'">'
+      + '<input type="text" class="prob-note" value="'+esc(r.note||'')+'" placeholder="Ghi chú (VD: 10 ngày thử việc)" style="flex:1 1 200px;'+PROB_INPUT_STYLE+'">'
+      + '<button class="btn-mini prob-del" type="button" style="color:var(--pink)">✕</button>'
+      + '</div>';
+  }
+  function bindProbRows_(){
+    var el = $('probRows'); if(!el) return;
+    Array.prototype.forEach.call(el.querySelectorAll('.prob-del'), function(b){
+      b.onclick = function(){ var row = b.closest('.prob-row'); if(row){ row.remove(); updateProbTotal_(); } };
+    });
+    Array.prototype.forEach.call(el.querySelectorAll('.prob-amount'), function(inp){
+      inp.oninput = updateProbTotal_;
+    });
+    updateProbTotal_();
+  }
+  function updateProbTotal_(){
+    var el = $('probRows'), t = $('probTotal'); if(!el || !t) return;
+    var sum = 0;
+    Array.prototype.forEach.call(el.querySelectorAll('.prob-amount'), function(i){ sum += unfmtNum(i.value); });
+    t.textContent = 'Tổng thử việc tháng này: ' + fmtVND(sum) + 'đ';
+  }
+  function renderProbationEditor(){
+    if(AUTH.role !== 'owner') return;
+    ensureProbationTab_();
+    var mEl = $('probMonth'); if(!mEl) return;
+    if(!mEl.value) mEl.value = ($('payMonth') && $('payMonth').value) || curMonthStr();
+    var month = mEl.value;
+    google.script.run.withSuccessHandler(function(res){
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Không tải được lương thử việc.', true); return; }
+      var rows = (res.data && res.data.length) ? res.data : [{}];
+      $('probRows').innerHTML = rows.map(probRowHTML).join('');
+      bindProbRows_();
+    }).withFailureHandler(onFailure).getProbationByMonth(AUTH.token, month);
+  }
+  function saveProbationUI(){
+    var month = $('probMonth') ? $('probMonth').value : ''; if(!month) return;
+    var items = Array.prototype.slice.call($('probRows').querySelectorAll('.prob-row')).map(function(row){
+      return {
+        name: row.querySelector('.prob-name').value.trim(),
+        channel: row.querySelector('.prob-chan').value,
+        amount: unfmtNum(row.querySelector('.prob-amount').value),
+        note: row.querySelector('.prob-note').value.trim()
+      };
+    });
+    overlay(true);
+    google.script.run.withSuccessHandler(function(res){
+      overlay(false);
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Lưu thất bại.', true); return; }
+      invalidatePayCache();
+      toast('Đã lưu lương thử việc tháng '+month+' ('+res.saved+' dòng).');
+      renderProbationEditor();
+      if($('payMonth') && $('payMonth').value === month) calcPayroll();
+    }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).saveProbationBatch(AUTH.token, month, items);
+  }
+
+  function loadPayrollConfig(then){
+    google.script.run.withSuccessHandler(function(res){
+      if(authGate(res)) return;
+      if(!res||!res.success){ toast((res&&res.error)||'Không đọc được cấu hình lương.', true); if(then) then(); return; }
+      // FIX: Lưu scopeNames + scopeChannels để Lead filter đúng nhân sự / kênh trong phạm vi mình
+      state.payCfg = { chung:res.chung||{}, hourly:res.hourly||[], moc:res.moc||[], scopeNames:res.scopeNames||null, scopeChannels:res.scopeChannels||null };
+      state.payCfgAt = Date.now();
+      renderCfgHourly(); renderCfgMoc(); renderCfgChung();
+      if(then) then();
+    }).withFailureHandler(function(e){ toast('Lỗi cấu hình lương: '+((e&&e.message)||e), true); if(then) then(); }).getPayrollConfig(AUTH.token);
+  }
+
+  /** TỐI ƯU: tính lương tháng hiện tại + lấy tổng hợp tháng trước (để so sánh) SONG SONG —
+   *  trước đây tháng trước chỉ được gọi SAU KHI tháng này xong (2 lượt chờ nối tiếp), giờ đồng thời. */
+  /** Gộp state.payResultPrevMap + state.payPrevSummary từ dữ liệu tháng trước (dùng chung cho cả
+   *  calcPayroll và fetchPrevMonthSummary, tránh lặp code tính tổng). */
+  function applyPrevSummary_(prevMonth, prevData){
+    prevData = prevData || [];
+    state.payPrevMonth = prevMonth; state.payPrevData = prevData; // giữ lại để lưu tạm (cache)
+    state.payResultPrevMap = {};
+    prevData.forEach(function(p){ state.payResultPrevMap[String(p.name).toLowerCase()] = Number(p.total)||0; });
+    state.payPrevSummary = prevMonth ? {
+      month: prevMonth,
+      names: prevData.map(function(p){ return p.name; }),
+      count: prevData.length,
+      hoursPay: prevData.reduce(function(s,p){ return s+(Number(p.hoursPay)||0); }, 0),
+      bonus: prevData.reduce(function(s,p){ return s+(Number(p.bonus)||0); }, 0),
+      hoTro: prevData.reduce(function(s,p){ return s+(Number(p.hoTro)||0); }, 0),
+      luongCung: prevData.reduce(function(s,p){ return s+(Number(p.luongCung)||0); }, 0),
+      probation: prevData.reduce(function(s,p){ return s+(Number(p.probation)||0); }, 0),
+      total: prevData.reduce(function(s,p){ return s+(Number(p.total)||0); }, 0)
+    } : null;
+  }
+
+  /** TỐI ƯU: tính lương tháng này + lấy tổng hợp tháng trước trong 1 LƯỢT GỌI backend duy nhất
+   *  (computePayrollWithPrev — chỉ đọc CaLive 1 lần thay vì 2), thay vì 2 lượt gọi song song trước đây. */
+  /* ---------- LƯU TẠM BẢNG LƯƠNG (stale-while-revalidate) ----------
+   * Chuyển tab qua lại không còn gọi lại server + chặn màn hình: hiện NGAY kết quả đã có, rồi tự làm mới ngầm
+   * nếu đã cũ (>20 giây). Mọi thao tác ghi dữ liệu gọi invalidatePayCache() để lần sau tính lại đúng. */
+  function payCacheKey_(month){ return month + '|' + (state.payChannelFilter||[]).slice().sort().join(',') + '|' + AUTH.role; }
+  function invalidatePayCache(){ state.payCache = null; state.payCacheVer = (state.payCacheVer||0) + 1; state.payCfgAt = 0; }
+  function savePayCache_(month){
+    state.payCache = { key: payCacheKey_(month), at: Date.now(), d: {
+      data: state.payResult, locked: state.payLocked, lockInfo: state.payLockInfo,
+      returnRate: $('payReturn') ? Number($('payReturn').value) : 0,
+      prevMonth: state.payPrevMonth, prevData: state.payPrevData } };
+  }
+  function applyPayCache_(d){
+    state.payResult = d.data || [];
+    state.payLocked = !!d.locked;
+    state.payLockInfo = d.lockInfo || null;
+    if($('payReturn') && document.activeElement !== $('payReturn')) $('payReturn').value = (d.returnRate!=null ? d.returnRate : 0);
+    applyPrevSummary_(d.prevMonth, d.prevData);
+    renderPayLockUI();
+    renderPayResult();
+  }
+
+  /** Tính lương tháng này + tháng trước trong 1 lượt gọi (computePayrollWithPrev).
+   *  opts.silent=true: làm mới ngầm (không chặn màn hình, không báo lỗi, không ghi đè nếu bạn đang nhập dở). */
+  function calcPayroll(opts){
+    opts = (opts && typeof opts === 'object' && opts.silent) ? opts : {};
+    var month = $('payMonth') ? $('payMonth').value : '';
+    if(!month) return;
+    var ver = state.payCacheVer || 0;
+    if(!opts.silent) overlay(true);
+    google.script.run.withSuccessHandler(function(res){
+      if(!opts.silent) overlay(false);
+      if(authGate(res)) return;
+      if(!res||!res.success){ if(!opts.silent) toast((res&&res.error)||'Không tính được lương.', true); return; }
+      var d = { data: res.data||[], locked: !!res.locked, lockInfo: res.lockInfo||null, returnRate: res.returnRate, prevMonth: res.prevMonth, prevData: res.prevData };
+      var stillValid = ((state.payCacheVer||0) === ver); // nếu giữa chừng có thao tác ghi dữ liệu thì bỏ qua kết quả cũ
+      if(opts.silent && (!stillValid || state.payDirty || $('payMonth').value !== month)) return;
+      applyPayCache_(d);
+      if(stillValid) savePayCache_(month);
+    }).withFailureHandler(function(e){ if(opts.silent) return; overlay(false); onFailure(e); }).computePayrollWithPrev(AUTH.token, month, state.payChannelFilter||[]);
+  }
+
+  /** Hiện/ẩn nút Chốt/Mở chốt + banner trạng thái tháng lương. */
+  function renderPayLockUI(){
+    var locked = !!state.payLocked;
+    var info = state.payLockInfo || null;
+    var isOwner = AUTH.role === 'owner';
+    if($('payLockBtn')) $('payLockBtn').style.display = (isOwner && !locked) ? '' : 'none';
+    if($('payUnlockBtn')) $('payUnlockBtn').style.display = (isOwner && locked) ? '' : 'none';
+    var badge = $('payLockBadge');
+    if(!badge) return;
+    if(locked && info){
+      badge.style.display = '';
+      badge.classList.remove('mo-chot');
+      badge.innerHTML = '<span class="lock-icon">🔒</span> Tháng này <b>đã được chốt</b> bởi <b>'+esc(info.by)+'</b> lúc '+esc(info.at)
+        + (info.note ? (' · Ghi chú: '+esc(info.note)) : '')
+        + '. ' + (isOwner ? 'Bạn (Owner) vẫn sửa được — hệ thống tự cập nhật lại; Lead/nhân viên khác không sửa được nữa.' : 'Chỉ Owner mới sửa được lúc này.');
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function lockPayrollMonthUI(){
+    var month = $('payMonth') ? $('payMonth').value : ''; if(!month) return;
+    var note = prompt('Ghi chú khi chốt lương (không bắt buộc):') || '';
+    confirmDialog('Chốt lương tháng '+month+'?\n\nSau khi chốt, kết quả được LƯU CỐ ĐỊNH (snapshot) — Lead/nhân viên không sửa điểm, thưởng hỗ trợ được nữa. Bạn (Owner) vẫn sửa được, hệ thống sẽ tự cập nhật lại.', function(){
+      overlay(true);
+      google.script.run.withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Chốt lương thất bại.', true); return; }
+        invalidatePayCache();
+        toast('🔒 Đã chốt lương tháng '+month+' ('+res.count+' nhân viên).');
+        calcPayroll();
+      }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).chotLuongThang(AUTH.token, month, note);
+    }, {title:'🔒 Chốt lương tháng', okText:'Chốt lương', danger:true});
+  }
+  function unlockPayrollMonthUI(){
+    var month = $('payMonth') ? $('payMonth').value : ''; if(!month) return;
+    var reason = prompt('Lý do mở chốt (không bắt buộc):') || '';
+    confirmDialog('Mở chốt lương tháng '+month+' để chỉnh sửa lại?', function(){
+      overlay(true);
+      google.script.run.withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Mở chốt thất bại.', true); return; }
+        invalidatePayCache();
+        toast('🔓 Đã mở chốt tháng '+month+'.');
+        calcPayroll();
+      }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).moChotLuongThang(AUTH.token, month, reason);
+    }, {title:'🔓 Mở chốt lương', okText:'Mở chốt'});
+  }
+
+  /** Lấy thêm tổng thu nhập tháng TRƯỚC (theo tên) để hiện chênh lệch trong renderPayResult, rồi mới render + tắt overlay. */
+  /** Chỉ TẢI dữ liệu tháng trước + lưu vào state — KHÔNG tự render/tắt overlay (để nơi gọi
+   *  tự phối hợp chạy song song với lượt gọi khác, thay vì luôn phải đợi tuần tự). */
+  function fetchPrevMonthSummary(month, done){
+    var prevMonth = prevMonthStr(month);
+    if(!prevMonth){ applyPrevSummary_(null, []); if(done) done(); return; }
+    google.script.run
+      .withSuccessHandler(function(pres){
+        var prevData = (pres && pres.success) ? (pres.data||[]) : [];
+        applyPrevSummary_(prevMonth, prevData);
+        if(done) done();
+      })
+      .withFailureHandler(function(){ applyPrevSummary_(null, []); if(done) done(); })
+      .computePayroll(AUTH.token, prevMonth, state.payChannelFilter||[]);
+  }
+
+  function ensurePayCompareContainer_(){
+    if($('payCompareCard')) return $('payCompareCard');
+    var resultEl = $('payResult');
+    if(!resultEl || !resultEl.parentNode) return null;
+    resultEl.insertAdjacentHTML('beforebegin', '<div class="card" id="payCompareCard" style="margin-bottom:14px; display:none;"></div>');
+    return $('payCompareCard');
+  }
+  /** So sánh số nhân sự + breakdown chi phí lương với tháng trước (lương giờ / thưởng KPI / thưởng hỗ trợ / lương cứng). */
+  function renderPayCompareCard(data){
+    var box = ensurePayCompareContainer_(); if(!box) return;
+    var prev = state.payPrevSummary;
+    if(!prev){ box.style.display = 'none'; return; }
+
+    var curCount = data.length;
+    var curHoursPay = data.reduce(function(s,p){ return s+(Number(p.hoursPay)||0); }, 0);
+    var curBonus = data.reduce(function(s,p){ return s+(Number(p.bonus)||0); }, 0);
+    var curHoTro = data.reduce(function(s,p){ return s+(Number(p.hoTro)||0); }, 0);
+    var curLuongCung = data.reduce(function(s,p){ return s+(Number(p.luongCung)||0); }, 0);
+    var curProbation = data.reduce(function(s,p){ return s+(Number(p.probation)||0); }, 0);
+    var curTotal = data.reduce(function(s,p){ return s+(Number(p.total)||0); }, 0);
+
+    var curNamesLower = {}; data.forEach(function(p){ curNamesLower[p.name.toLowerCase()] = true; });
+    var prevNamesLower = {}; (prev.names||[]).forEach(function(n){ prevNamesLower[n.toLowerCase()] = true; });
+    var newNames = data.filter(function(p){ return !prevNamesLower[p.name.toLowerCase()]; }).map(function(p){ return p.name; });
+    var leftNames = (prev.names||[]).filter(function(n){ return !curNamesLower[n.toLowerCase()]; });
+
+    function diffLine(label, cur, prevV){
+      var d = cur - prevV;
+      var pctTxt = '';
+      if(prevV !== 0){ var pct = d/prevV*100; pctTxt = ' (' + (pct>0?'+':'') + pct.toFixed(0) + '%)'; }
+      else if(d !== 0){ pctTxt = ' (mới)'; }
+      var arrow = d > 0 ? '▲' : (d < 0 ? '▼' : '—');
+      var color = d > 0 ? '#dc2626' : (d < 0 ? '#059669' : '#9ca3af'); // chi phí tăng -> đỏ để chú ý; giảm -> xanh
+      var sign = d > 0 ? '+' : '';
+      return '<div style="display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px dashed var(--line); font-size:13px;">'
+        + '<span>'+label+'</span>'
+        + '<span>'+fmtVND(cur)+'đ &nbsp;<span style="color:'+color+';font-weight:600">'+arrow+' '+sign+fmtVND(Math.abs(d))+'đ'+pctTxt+'</span></span>'
+      + '</div>';
+    }
+
+    var countDiff = curCount - prev.count;
+    var countArrow = countDiff > 0 ? '▲' : (countDiff < 0 ? '▼' : '—');
+    var countColor = countDiff > 0 ? '#1d4ed8' : (countDiff < 0 ? '#dc2626' : '#9ca3af');
+    var countSign = countDiff > 0 ? '+' : '';
+
+    var html = '<h3 style="margin:0 0 12px;">📊 So sánh với tháng trước ('+esc(prev.month)+')</h3>'
+      + '<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0 12px; border-bottom:1.5px solid var(--line); margin-bottom:4px;">'
+        + '<span style="font-weight:600">Số nhân sự có lương</span>'
+        + '<span style="font-size:15px; font-weight:700;">'+curCount+' người &nbsp;<span style="color:'+countColor+';font-size:13px;">'+countArrow+' '+countSign+countDiff+'</span> <span class="kdim">(tháng trước '+prev.count+')</span></span>'
+      + '</div>'
+      + diffLine('💰 Lương giờ', curHoursPay, prev.hoursPay)
+      + diffLine('🏆 Thưởng KPI', curBonus, prev.bonus)
+      + diffLine('🎁 Thưởng hỗ trợ', curHoTro, prev.hoTro)
+      + diffLine('💼 Lương cứng', curLuongCung, prev.luongCung)
+      + diffLine('🧪 Thử việc', curProbation, prev.probation || 0)
+      + '<div style="display:flex; justify-content:space-between; padding:10px 0 0; margin-top:4px; font-weight:700; font-size:14px;">'
+        + '<span>Tổng quỹ lương</span>'
+        + '<span>'+fmtVND(curTotal)+'đ</span>'
+      + '</div>';
+
+    if(newNames.length) html += '<p class="hint" style="margin-top:10px;">🆕 <b>Nhân sự mới</b> (chưa có lương tháng trước): '+newNames.map(esc).join(', ')+'</p>';
+    if(leftNames.length) html += '<p class="hint" style="margin-top:6px;">👋 <b>Có lương tháng trước nhưng KHÔNG có tháng này</b>: '+leftNames.map(esc).join(', ')+'</p>';
+
+    box.innerHTML = html;
+    box.style.display = '';
+  }
+
+  /** Xuất bảng lương chi tiết theo kênh (.xlsx) — mở link tải trong tab mới. */
+  function exportPayrollXlsxUI(){
+    var month = $('payMonth') ? $('payMonth').value : '';
+    if(!month){ toast('Chọn tháng trước khi xuất.', true); return; }
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Xuất Excel thất bại.', true); return; }
+        window.open(res.url, '_blank');
+        toast('✓ Đã tạo file "'+res.fileName+'" — đang mở tải xuống.');
+      })
+      .withFailureHandler(function(e){ overlay(false); onFailure(e); })
+      .exportPayrollXlsx(AUTH.token, month, state.payChannelFilter||[]);
+  }
+
+  function renderPayResult(){
+    var data = state.payResult||[], ed = PERM.salaryEditable, grand = 0;
+    var el = $('payResult'); if(!el) return;
+    renderPayCompareCard(data);
+    if(!data.length){
+      el.innerHTML = '<div class="card"><div class="empty"><div class="big">💰</div>Chưa có dữ liệu lương trong tháng này.</div></div>';
+      if($('payTotal')) $('payTotal').textContent = '0đ'; return;
+    }
+    var zeroWarnNames = [];
+    el.innerHTML = data.map(function(p){
+      grand += p.total;
+      // FIX 5: đọc điểm ưu tiên từ cấp nhân viên (p.diem), fallback lines[0].diem cho tương thích ngược
+      var diem = (p.diem != null) ? p.diem : ((p.lines[0] && p.lines[0].diem) || 0);
+      var diemCell = ed
+        ? '<input type="number" class="pay-diem" data-name="'+esc(p.name)+'" value="'+diem+'" min="0" step="0.1">'
+        : '<b>'+diem+'</b>';
+      if(p.diemDefault) diemCell += ' <span class="kdim">(mặc định theo tháng trước đã chốt — sửa nếu cần rồi bấm "Cập nhật &amp; tính lương")</span>';
+      var lines = p.lines.map(function(l){
+        var hasMoc = (l.mocGmvh != null); // dữ liệu cũ (tháng đã chốt trước bản cập nhật) sẽ không có — ẩn phần công thức nếu thiếu
+        var kBreakdown = hasMoc
+          ? '<div style="margin-top:6px; font-size:11.5px; color:var(--text-faint); line-height:1.7;">'
+            + '<div>K1 (GMV/h): mốc <b>'+fmtVND(l.mocGmvh)+'</b> → thực tế <b>'+fmtVND(l.gmvh)+'</b> → hệ số <b>'+l.k1+'</b> <span class="kdim">(hệ số x'+l.hesoGmvh+' · trần '+l.tranGmvh+')</span></div>'
+            + '<div>K2 (NMV): mốc <b>'+fmtVND(l.mocNmv)+'</b> → thực tế <b>'+fmtVND(l.nmv)+'</b> → hệ số <b>'+l.k2+'</b> <span class="kdim">(hệ số x'+l.hesoNmv+' · trần '+l.tranNmv+')</span></div>'
+            + '<div>K3 (Điểm phòng live): mốc <b>'+l.mocDiem+'</b> → thực tế <b>'+l.diem+'</b> → hệ số <b>'+l.k3+'</b> <span class="kdim">(hệ số x'+l.hesoDiem+' · trần '+l.tranDiem+')</span></div>'
+            + '<div style="margin-top:4px; padding-top:4px; border-top:1px dashed var(--line); color:var(--text);">'
+              + 'Công thức: % '+(l.role==='Host'?'Host':'Trợ live')+' (<b>'+(l.pctApplied*100).toFixed(2)+'%</b>) × Tổng hệ số (<b>'+l.tongHeSo+'</b>) × NMV (<b>'+fmtVND(l.nmv)+'</b>) = <b style="color:var(--accent)">'+fmtVND(l.thuong)+'đ</b>'
+            + '</div>'
+          + '</div>'
+          : '';
+        return '<div class="payline">'
+          + '<div class="payline-head"><span class="pill '+(l.role==='Host'?'host':'la')+'">'+(l.role==='Host'?'Host':'Trợ live')+'</span> <b>'+esc(l.channel)+'</b><span class="payline-bonus">+'+fmtVND(l.thuong)+'đ</span></div>'
+          + '<div class="payline-grid">'
+            + '<span>Giờ <b>'+l.hours+'h</b></span>'
+            + '<span>GMV <b>'+fmtVND(l.gmv)+'</b></span>'
+            + '<span>GMV/h <b>'+fmtVND(l.gmvh)+'</b></span>'
+            + '<span>NMV <b>'+fmtVND(l.nmv)+'</b></span>'
+            + '<span>Hệ số <b>'+l.tongHeSo+'</b> <span class="kdim">(K1 '+l.k1+'·K2 '+l.k2+'·K3 '+l.k3+')</span></span>'
+            + '<span>Lương giờ <b>'+fmtVND(l.hoursPay)+'</b></span>'
+          + '</div>'
+          + ((l.holidayDays && l.holidayDays.length)
+              ? '<div style="margin-top:6px;font-size:12.5px;color:#9a6a00;">🎉 Ngày lễ: '
+                + l.holidayDays.map(function(d){ return d.date.slice(8,10)+'/'+d.date.slice(5,7)+' <b>×'+d.mult+'</b> ('+d.hours+'h)'; }).join(' · ')
+                + ' → lương giờ cộng thêm <b>'+fmtVND(l.holidayExtra)+'đ</b> (đã nằm trong "Lương giờ")</div>'
+              : '')
+          + kBreakdown
+          + '</div>';
+      }).join('');
+      var extraBadges = '';
+      if(p.probation) extraBadges += '<span class="pill" style="background:#fff3d6;color:#9a6a00;margin-left:6px">🧪 Thử việc '+fmtVND(p.probation)+'đ</span>';
+      var pureProb = !!(p.isProbation && (!p.lines || !p.lines.length));
+      var probBlock = (p.probationItems && p.probationItems.length)
+        ? '<div class="pay-emp-hotro" style="flex-direction:column; align-items:flex-start; gap:4px;"><b class="sub-hotro" style="color:#9a6a00">🧪 Lương thử việc (nhập tay, không chấm công):</b>'
+          + p.probationItems.map(function(it){
+              return '<div style="font-size:13px;">• '+(it.channel?('<b>'+esc(it.channel)+'</b> · '):'')+'<b>'+fmtVND(it.amount)+'đ</b>'+(it.note?(' <span class="kdim">— '+esc(it.note)+'</span>'):'')+'</div>';
+            }).join('')
+          + '</div>'
+        : '';
+      if(p.luongCung) extraBadges += '<span class="pill" style="background:#e4dcfb;color:#5b3fb0;margin-left:6px">💼 Lương cứng '+fmtVND(p.luongCung)+'đ</span>';
+      // ⚠️ Cảnh báo: có ca live trong tháng nhưng tổng lương tính ra = 0đ (VD chưa cấu hình đơn giá/mốc thưởng)
+      var hasZeroWarn = !!(p.lines && p.lines.length && p.total === 0);
+      if(hasZeroWarn) zeroWarnNames.push(p.name);
+      if(hasZeroWarn) extraBadges += '<span class="pill" style="background:#fee2e2;color:#b91c1c;margin-left:6px">⚠️ Có ca live nhưng lương = 0đ</span>';
+      var hoTroItems = (p.hoTroItems && p.hoTroItems.length) ? p.hoTroItems : [{channel:'', amount:0, note:''}];
+      var hoTroRowsHtml = hoTroItems.map(hotroItemHTML).join('');
+      var hoTroBlock = '<div class="pay-emp-hotro">'
+        + '<b class="sub-hotro">🎁 Thưởng hỗ trợ:</b>'
+        + '<div class="hotro-list">'+hoTroRowsHtml+'</div>'
+        + '<button type="button" class="hotro-add-btn">+ Thêm dòng</button>'
+        + '</div>';
+      // So với tháng trước
+      var diffBadge = '';
+      var prevMap = state.payResultPrevMap || {};
+      var prevTotal = prevMap[p.name.toLowerCase()];
+      if(prevTotal != null){
+        var diff = p.total - prevTotal;
+        var pctTxt = '';
+        if(prevTotal !== 0){
+          var pct = diff / prevTotal * 100;
+          pctTxt = ' (' + (pct > 0 ? '+' : '') + pct.toFixed(0) + '%)';
+        }
+        var arrow = diff > 0 ? '▲' : (diff < 0 ? '▼' : '—');
+        var color = diff > 0 ? '#059669' : (diff < 0 ? '#dc2626' : '#9ca3af');
+        var sign = diff > 0 ? '+' : '';
+        diffBadge = ' · <span style="color:'+color+';font-weight:600">'+arrow+' '+sign+fmtVND(diff)+'đ'+pctTxt+'</span> <span class="kdim">so tháng trước</span>';
+      } else {
+        diffBadge = ' · <span class="kdim">chưa có dữ liệu tháng trước</span>';
+      }
+      return '<div class="card pay-emp" data-name="'+esc(p.name)+'"'+(hasZeroWarn?' style="border:1.5px solid #fca5a5"':'')+'>'
+        + '<div class="pay-emp-head" data-toggle>'
+          + '<div><div class="pay-emp-name">'+esc(p.name)+extraBadges+'</div>'
+          + '<div class="pe-sub">'+(pureProb ? 'Nhân sự thử việc' : ('Lương giờ '+fmtVND(p.hoursPay)+' · Thưởng '+fmtVND(p.bonus)))+diffBadge+'</div></div>'
+          + '<div class="pe-total">'+fmtVND(p.total)+'đ <span class="pe-caret">▾</span></div>'
+        + '</div>'
+        + (pureProb ? '' : '<div class="pay-emp-diem">⭐ Điểm phòng live tháng: '+diemCell+'</div>')
+        + (pureProb ? '' : hoTroBlock)
+        + probBlock
+        + '<div class="pay-emp-body">'+lines+'</div>'
+        + '</div>';
+    }).join('');
+    var warnBanner = zeroWarnNames.length
+      ? '<div style="background:#fef2f2; border:1.5px solid #fecdd3; border-radius:10px; padding:12px 16px; margin-bottom:14px; color:#7f1d1d; font-size:13.5px;">'
+        + '⚠️ <b>'+zeroWarnNames.length+' nhân sự có ca live trong tháng nhưng tổng lương = 0đ</b>: '+zeroWarnNames.map(esc).join(', ')
+        + '. Kiểm tra lại <b>đơn giá giờ</b> hoặc <b>mốc thưởng</b> ở tab Cấu hình.'
+      + '</div>'
+      : '';
+    el.innerHTML = warnBanner + el.innerHTML;
+    if($('payTotal')) $('payTotal').textContent = fmtVND(grand)+'đ';
+    Array.prototype.forEach.call(el.querySelectorAll('[data-toggle]'), function(h){
+      h.onclick = function(){ h.parentNode.classList.toggle('open'); };
+    });
+    bindHotroSectionEvents(el);
+    state.payDirty = false;
+  }
+
+  /* Thưởng hỗ trợ — mỗi dòng gồm Kênh (tuỳ chọn) + Số tiền + Ghi chú.
+     Hiển thị NGAY DƯỚI mỗi nhân sự trong kết quả bảng lương (không phải card riêng). */
+  function hotroItemHTML(item){
+    item = item || {};
+    var chanOpts = '<option value="">— Kênh (tuỳ chọn) —</option>' + (state.channels||[]).map(function(c){
+      return '<option value="'+esc(c)+'"'+(c===item.channel?' selected':'')+'>'+esc(c)+'</option>';
+    }).join('');
+    return '<div class="hotro-item">'
+      + '<select class="hotro-chan-select">'+chanOpts+'</select>'
+      + '<input type="text" inputmode="numeric" class="numfmt pay-hotro" value="'+fmtThousand(item.amount||0)+'" placeholder="Số tiền">'
+      + '<input type="text" class="pay-hotro-note" value="'+esc(item.note||'')+'" placeholder="Ghi chú">'
+      + '<button type="button" class="hotro-remove-btn" title="Xoá dòng">✕</button>'
+      + '</div>';
+  }
+  function bindHotroSectionEvents(scopeEl){
+    Array.prototype.forEach.call(scopeEl.querySelectorAll('.hotro-remove-btn'), function(b){
+      b.onclick = function(){ var it = b.closest('.hotro-item'); if(it) it.remove(); };
+    });
+    Array.prototype.forEach.call(scopeEl.querySelectorAll('.hotro-add-btn'), function(b){
+      b.onclick = function(){
+        var list = b.previousElementSibling;
+        if(!list) return;
+        list.insertAdjacentHTML('beforeend', hotroItemHTML({}));
+        var newItem = list.lastElementChild;
+        newItem.querySelector('.hotro-remove-btn').onclick = function(){ newItem.remove(); };
+      };
+    });
+  }
+
+  // FIX 4: Viết lại tuần tự — thu tất cả input TRƯỚC (điểm + thưởng hỗ trợ), rồi gửi
+  // trong 1 lần gọi saveMonthUpdate (backend: lưu hoàn huỷ + điểm + thưởng hỗ trợ + tính lương).
+  function updateAndCalc(){
+    var month = $('payMonth') ? $('payMonth').value : ''; if(!month) return;
+    var ret = Number($('payReturn').value)||0;
+    // Thu tất cả điểm cần lưu TRƯỚC (snapshot DOM để không bị đè khi render lại)
+    var diems = Array.prototype.slice.call(document.querySelectorAll('.pay-diem')).map(function(inp){
+      return { name: inp.getAttribute('data-name'), diem: Number(inp.value)||0 };
+    });
+    // Thu tất cả dòng thưởng hỗ trợ của TỪNG nhân sự (nằm ngay dưới mỗi card)
+    var hoTroList = [];
+    Array.prototype.forEach.call(document.querySelectorAll('.pay-emp'), function(card){
+      var name = card.getAttribute('data-name');
+      if(!name) return;
+      Array.prototype.forEach.call(card.querySelectorAll('.hotro-item'), function(item){
+        var ch = item.querySelector('.hotro-chan-select').value;
+        var amt = unfmtNum(item.querySelector('.pay-hotro').value);
+        var note = item.querySelector('.pay-hotro-note').value.trim();
+        if(amt === 0 && !note && !ch) return; // bỏ dòng rỗng
+        hoTroList.push({ name: name, channel: ch, amount: amt, note: note });
+      });
+    });
+    overlay(true);
+    invalidatePayCache(); // đang ghi dữ liệu -> bỏ mọi kết quả làm mới ngầm đang bay
+    var saveDone = false, prevDone = false, saveOk = false;
+    function finishIfReady(){
+      if(!saveDone || !prevDone) return;
+      overlay(false);
+      if(saveOk){ renderPayLockUI(); renderPayResult(); savePayCache_(month); toast('Đã cập nhật & tính lại lương.'); }
+    }
+    google.script.run.withSuccessHandler(function(res){
+      saveDone = true;
+      if(authGate(res)) { finishIfReady(); return; }
+      if(!res || !res.success){ toast((res && res.error) || 'Cập nhật thất bại.', true); finishIfReady(); return; }
+      saveOk = true;
+      state.payResult = res.data||[];
+      state.payLocked = !!res.locked;
+      state.payLockInfo = res.lockInfo || null;
+      if($('payReturn') && document.activeElement !== $('payReturn')) $('payReturn').value = (res.returnRate!=null?res.returnRate:0);
+      finishIfReady();
+    }).withFailureHandler(function(e){ saveDone = true; onFailure(e); finishIfReady(); }).saveMonthUpdate(AUTH.token, month, ret, diems, hoTroList, state.payChannelFilter||[]);
+
+    fetchPrevMonthSummary(month, function(){ prevDone = true; finishIfReady(); });
+  }
+
+  function renderCfgHourly(){
+    var el = $('cfgHourly'); if(!el) return;
+    var cfg = state.payCfg||{};
+    var hourlyList = cfg.hourly||[];
+    var scope = cfg.scopeNames; // null = tất cả (owner) | mảng tên (lead, đã lowercase)
+    var scopeSet = null;
+    if(scope){ scopeSet = {}; scope.forEach(function(n){ scopeSet[String(n).toLowerCase()] = true; }); }
+
+    // Mã NV theo tên (để hiện cạnh tên nhân viên)
+    var codeByName = {};
+    (state.staffFull||[]).forEach(function(s){ if(s.code) codeByName[s.name.toLowerCase()] = s.code; });
+
+    // Gom TẤT CẢ dòng đơn giá theo tên — mỗi người có thể có nhiều dòng:
+    // 1 dòng "mặc định" (kênh rỗng, áp dụng mọi kênh chưa có giá riêng) + N dòng riêng theo từng kênh.
+    var byName = {}; // nameLower -> {name, rows:[{channel,host,tro}]}
+    hourlyList.forEach(function(h){
+      var lk = h.name.toLowerCase();
+      if(scopeSet && !scopeSet[lk]) return;
+      if(!byName[lk]) byName[lk] = { name: h.name, rows: [] };
+      byName[lk].rows.push({ channel: h.channel||'', host: h.host||0, tro: h.tro||0 });
+    });
+    // Đảm bảo mọi nhân viên trong phạm vi đều có sẵn dòng mặc định để chỉnh (kể cả khi chưa từng nhập giá)
+    (state.staffFull||[]).forEach(function(s){
+      var lk = s.name.toLowerCase();
+      if(scopeSet && !scopeSet[lk]) return;
+      if(!byName[lk]) byName[lk] = { name: s.name, rows: [] };
+      var hasDefault = byName[lk].rows.some(function(r){ return !r.channel; });
+      if(!hasDefault) byName[lk].rows.unshift({ channel:'', host:0, tro:0 });
+    });
+
+    // Tần suất kênh mỗi người đã live (để sắp xếp dòng riêng theo mức độ liên quan)
+    var chanByStaff = {};
+    (state.records||[]).forEach(function(r){
+      var k = String(r.name||'').toLowerCase();
+      if(!k || !r.channel) return;
+      if(!chanByStaff[k]) chanByStaff[k] = {};
+      chanByStaff[k][r.channel] = (chanByStaff[k][r.channel]||0) + 1;
+    });
+
+    var names = Object.keys(byName).sort(function(a,b){ return byName[a].name.localeCompare(byName[b].name,'vi'); });
+    if(!names.length){ el.innerHTML = '<div class="cfg-empty">Chưa có nhân viên nào trong phạm vi của bạn.</div>'; return; }
+
+    el.innerHTML = names.map(function(lk){
+      var person = byName[lk];
+      var code = codeByName[lk];
+      var chanLine = Object.keys(chanByStaff[lk]||{})
+        .sort(function(a,b){ return chanByStaff[lk][b] - chanByStaff[lk][a]; })
+        .map(function(c){ return esc(c); });
+      var rows = person.rows.slice().sort(function(a,b){
+        if(!a.channel && b.channel) return -1;
+        if(a.channel && !b.channel) return 1;
+        var ca = (chanByStaff[lk]&&chanByStaff[lk][a.channel])||0;
+        var cb = (chanByStaff[lk]&&chanByStaff[lk][b.channel])||0;
+        return cb - ca;
+      });
+      var usedChans = {}; rows.forEach(function(r){ if(r.channel) usedChans[r.channel]=true; });
+      var chanOptions = (state.channels||[]).filter(function(c){ return !usedChans[c]; });
+      var addRowHtml = chanOptions.length
+        ? '<select class="cfg-add-chan-select" data-name="'+esc(person.name)+'" style="width:100%; padding:9px 12px; border-radius:8px; border:1.5px dashed var(--line); background:var(--field); color:var(--text-faint); font-size:13px; margin-top:4px;">'
+            + '<option value="">➕ Thêm đơn giá riêng cho 1 kênh…</option>'
+            + chanOptions.map(function(c){ return '<option value="'+esc(c)+'">'+esc(c)+'</option>'; }).join('')
+          + '</select>'
+        : '';
+      var rowsHtml = rows.map(function(r){ return hourlyRowHTML(person.name, r); }).join('');
+      return '<div class="cfg-emp-block" style="border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:14px;">'
+        + '<div class="cfg-emp-name" style="margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid var(--line);">'
+          + '<div style="display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px;">'
+            + esc(person.name)
+            + (code ? '<span style="font-size:11.5px; font-weight:600; color:var(--text-faint); background:var(--field); padding:2px 9px; border-radius:999px;">'+esc(code)+'</span>' : '')
+          + '</div>'
+          + (chanLine.length
+              ? '<div style="font-size:12px; color:var(--text-faint); font-weight:400; margin-top:3px;">📺 Đang live ở: '+chanLine.join(' · ')+'</div>'
+              : '<div style="font-size:12px; color:var(--text-faint); font-weight:400; margin-top:3px; font-style:italic;">Chưa có ca live nào được ghi nhận</div>')
+        + '</div>'
+        + rowsHtml
+        + addRowHtml
+      + '</div>';
+    }).join('');
+
+    Array.prototype.forEach.call(el.querySelectorAll('.cfg-save-hourly'), function(b){
+      bindCfgHourlySave(b);
+    });
+    Array.prototype.forEach.call(el.querySelectorAll('.cfg-add-chan-select'), function(sel){
+      sel.onchange = function(){
+        var chan = sel.value; if(!chan) return;
+        var name = sel.getAttribute('data-name');
+        sel.insertAdjacentHTML('beforebegin', hourlyRowHTML(name, {channel:chan, host:0, tro:0}));
+        bindCfgHourlySave(sel.previousElementSibling.querySelector('.cfg-save-hourly'));
+        var opt = sel.querySelector('option[value="'+chan.replace(/"/g,'&quot;')+'"]');
+        if(opt) opt.remove();
+        sel.value = '';
+      };
+    });
+  }
+  /** 1 dòng đơn giá (mặc định hoặc riêng theo kênh) — có nhãn rõ ràng "Host" và "Trợ live (LA)" tách biệt. */
+  function hourlyRowHTML(name, r){
+    var isDefault = !r.channel;
+    var isInvalid = !isDefault && (state.channels||[]).indexOf(r.channel) < 0;
+    var chanLabel;
+    if(isDefault){
+      chanLabel = '<span style="background:#eff6ff; color:#1d4ed8; font-weight:600; padding:3px 10px; border-radius:6px; font-size:12px;">Mặc định · mọi kênh</span>';
+    } else if(isInvalid){
+      chanLabel = '<span style="font-weight:600; color:#dc2626">'+esc(r.channel)+'</span> <span style="background:#fee2e2; color:#b91c1c; font-weight:600; padding:2px 8px; border-radius:5px; font-size:11px;">⚠️ Dữ liệu lỗi — không phải tên kênh, nên xoá</span>';
+    } else {
+      chanLabel = '<span style="font-weight:600">'+esc(r.channel)+'</span> <span style="background:#dcfce7; color:#166534; font-weight:600; padding:2px 8px; border-radius:5px; font-size:11px;">Riêng</span>';
+    }
+    var delBtn = isDefault ? '' : '<button class="btn-mini cfg-del-hourly" type="button" style="flex:0 0 auto; color:var(--pink)">Xoá</button>';
+    return '<div class="cfg-hourly-row" data-name="'+esc(name)+'" data-chan="'+esc(r.channel)+'" style="background:'+(isInvalid?'#fef2f2':(isDefault?'transparent':'#f0fdf4'))+'; border-radius:8px; padding:10px 12px; margin-bottom:8px;">'
+      + '<div style="margin-bottom:8px;">'+chanLabel+'</div>'
+      + '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">'
+        + '<div style="flex:1 1 130px;">'
+          + '<label style="display:block; font-size:11.5px; color:var(--text-faint); margin-bottom:4px;">Đơn giá Host live (đ/giờ)</label>'
+          + '<input type="text" inputmode="numeric" class="cfg-host numfmt" value="'+fmtThousand(r.host||0)+'" style="width:100%; padding:9px 10px; border-radius:8px; border:1.5px solid var(--line); background:var(--field); color:var(--text); box-sizing:border-box;">'
+        + '</div>'
+        + '<div style="flex:1 1 130px;">'
+          + '<label style="display:block; font-size:11.5px; color:var(--text-faint); margin-bottom:4px;">Đơn giá Trợ live / LA (đ/giờ)</label>'
+          + '<input type="text" inputmode="numeric" class="cfg-tro numfmt" value="'+fmtThousand(r.tro||0)+'" style="width:100%; padding:9px 10px; border-radius:8px; border:1.5px solid var(--line); background:var(--field); color:var(--text); box-sizing:border-box;">'
+        + '</div>'
+        + '<button class="btn-mini cfg-save-hourly" type="button" style="flex:0 0 auto;">Lưu</button>'
+        + delBtn
+      + '</div>'
+    + '</div>';
+  }
+  function bindCfgHourlySave(b){
+    b.onclick = function(){
+      var row = b.closest('.cfg-hourly-row');
+      var name = row.getAttribute('data-name');
+      var chan = row.getAttribute('data-chan') || '';
+      var host = unfmtNum(row.querySelector('.cfg-host').value);
+      var tro = unfmtNum(row.querySelector('.cfg-tro').value);
+      google.script.run.withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res||!res.success){ toast((res&&res.error)||'Lưu thất bại.', true); return; }
+        invalidatePayCache();
+        toast('Đã lưu đơn giá '+name+(chan?(' · '+chan):' (mặc định)'));
+      }).withFailureHandler(onFailure).saveLuongGio(AUTH.token, name, chan, host, tro);
+    };
+    var row = b.closest('.cfg-hourly-row');
+    var delB = row.querySelector('.cfg-del-hourly');
+    if(delB) delB.onclick = function(){
+      var name = row.getAttribute('data-name');
+      var chan = row.getAttribute('data-chan') || '';
+      confirmDialog('Xoá dòng đơn giá "'+chan+'" của "'+name+'"?', function(){
+        overlay(true);
+        google.script.run.withSuccessHandler(function(res){
+          overlay(false);
+          if(authGate(res)) return;
+          if(!res||!res.success){ toast((res&&res.error)||'Xoá thất bại.', true); return; }
+          invalidatePayCache();
+          toast('Đã xoá dòng "'+chan+'".');
+          row.remove();
+        }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).deleteLuongGio(AUTH.token, name, chan);
+      }, {danger:true, okText:'Xoá'});
+    };
+  }
+
+  function renderCfgMoc(){
+    var el = $('cfgMoc'); if(!el) return;
+    var cfg = state.payCfg||{};
+    var moc = cfg.moc||[];
+    var scope = cfg.scopeNames, scopeChan = cfg.scopeChannels;
+    var staffList = (state.staffFull||[]).filter(function(s){ return !scope || scope.indexOf(s.name.toLowerCase())>=0; });
+    var chanList = (state.channels||[]).filter(function(c){ return !scopeChan || scopeChan.indexOf(c.toLowerCase())>=0; });
+    var nameOpts = staffList.map(function(s){ return '<option value="'+esc(s.name)+'">'; }).join('');
+    var chanOpts = chanList.map(function(c){ return '<option value="'+esc(c)+'">'+esc(c)+'</option>'; }).join('');
+    var rows = moc.map(function(m){
+      return '<div class="cfg-row cfg-moc-row" data-name="'+esc(m.name)+'" data-chan="'+esc(m.channel)+'" data-role="'+esc(m.role)+'">'
+        + '<span class="cfg-name">'+esc(m.name)+'<br><span class="kdim">'+esc(m.channel)+' · '+(m.role==='Host'?'Host':'Trợ live')+'</span></span>'
+        + '<input type="text" inputmode="numeric" class="cfg-mgmvh numfmt" value="'+fmtThousand(m.mocGmvh||0)+'">'
+        + '<input type="text" inputmode="numeric" class="cfg-mnmv numfmt" value="'+fmtThousand(m.mocNmv||0)+'">'
+        + '<button class="btn-mini cfg-save-moc">Lưu</button>'
+        + '</div>';
+    }).join('');
+    el.innerHTML = '<div class="cfg-table">'
+      + '<div class="cfg-row cfg-head"><span>NV / Kênh / Vai trò</span><span>Mốc GMV/h</span><span>Mốc NMV</span><span></span></div>'
+      + (rows || '<div class="cfg-empty">Chưa có mốc nào. Thêm bên dưới.</div>')
+      + '</div>'
+      + '<div class="cfg-add"><div class="cfg-add-title">➕ Thêm / sửa mốc</div>'
+        + '<div class="cfg-add-grid">'
+          + '<input list="mocNames" id="mocAddName" placeholder="Tên nhân viên">'
+          + '<datalist id="mocNames">'+nameOpts+'</datalist>'
+          + '<select id="mocAddChan"><option value="">— Kênh —</option>'+chanOpts+'</select>'
+          + '<select id="mocAddRole"><option value="Host">Host</option><option value="Tro">Trợ live</option></select>'
+          + '<input type="text" inputmode="numeric" class="numfmt" id="mocAddGmvh" placeholder="Mốc GMV/h">'
+          + '<input type="text" inputmode="numeric" class="numfmt" id="mocAddNmv" placeholder="Mốc NMV">'
+          + '<button class="btn" id="mocAddBtn">Lưu mốc</button>'
+        + '</div></div>';
+    Array.prototype.forEach.call(el.querySelectorAll('.cfg-save-moc'), function(b){
+      b.onclick = function(){
+        var row = b.parentNode;
+        saveMoc(row.getAttribute('data-name'), row.getAttribute('data-chan'), row.getAttribute('data-role'),
+          unfmtNum(row.querySelector('.cfg-mgmvh').value), unfmtNum(row.querySelector('.cfg-mnmv').value));
+      };
+    });
+    if($('mocAddBtn')) $('mocAddBtn').onclick = function(){
+      var name = $('mocAddName').value.trim(), chan = $('mocAddChan').value, role = $('mocAddRole').value;
+      if(!name || !chan){ toast('Chọn tên và kênh.', true); return; }
+      saveMoc(name, chan, role, unfmtNum($('mocAddGmvh').value), unfmtNum($('mocAddNmv').value), true);
+    };
+  }
+  function saveMoc(name, chan, role, gmvh, nmv, reload){
+    google.script.run.withSuccessHandler(function(res){
+      if(authGate(res)) return;
+      if(!res||!res.success){ toast((res&&res.error)||'Lưu mốc thất bại.', true); return; }
+      invalidatePayCache(); toast('Đã lưu mốc'); if(reload) loadPayrollConfig();
+    }).withFailureHandler(onFailure).saveThuongMoc(AUTH.token, name, chan, role, gmvh, nmv);
+  }
+
+  // FIX 6 (bonus): Thêm ô "Tỷ lệ hoàn huỷ mặc định (%)" để Owner đặt fallback
+  // Khi tháng nào chưa có hoàn huỷ riêng, engine sẽ dùng giá trị này.
+  function renderCfgChung(){
+    var el = $('cfgChung'); if(!el) return;
+    if(AUTH.role !== 'owner'){ if($('cfgChungCard')) $('cfgChungCard').style.display='none'; return; }
+    if($('cfgChungCard')) $('cfgChungCard').style.display='';
+    var c = (state.payCfg&&state.payCfg.chung)||{};
+    function f(key,label,step){ return '<div class="field"><label>'+label+'</label><input type="number" id="cfg_'+key+'" value="'+(c[key]!=null?c[key]:0)+'" step="'+(step||0.01)+'"></div>'; }
+    el.innerHTML = '<div class="cfg-chung-grid">'
+      + f('pct_host','% thưởng Host',0.01) + f('pct_tro','% thưởng Trợ live',0.01)
+      + f('heso_gmvh','Hệ số GMV/h',0.01) + f('tran_gmvh','Trần GMV/h',0.01)
+      + f('heso_nmv','Hệ số NMV',0.01) + f('tran_nmv','Trần NMV',0.01)
+      + f('heso_diem','Hệ số Điểm',0.01) + f('tran_diem','Trần Điểm',0.01)
+      + f('moc_diem','Mốc điểm phòng live',0.1) + f('vat','VAT (số chia, vd 1.08)',0.01)
+      + f('hoan_huy','Tỷ lệ hoàn huỷ mặc định (%)',0.1)
+      + '</div>'
+      + '<p class="hint" style="margin:-6px 0 12px;">💡 <b>Tỷ lệ hoàn huỷ mặc định</b>: khi tháng chưa nhập hoàn huỷ riêng, hệ thống dùng giá trị này (mặc định 30%). Nhập số % nguyên, VD 30 = 30%.</p>'
+      + '<button class="btn" id="cfgChungSave">Lưu cấu hình chung</button>';
+    if($('cfgChungSave')) $('cfgChungSave').onclick = function(){
+      var keys=['pct_host','pct_tro','heso_gmvh','tran_gmvh','heso_nmv','tran_nmv','heso_diem','tran_diem','moc_diem','vat','hoan_huy'];
+      var obj={}; keys.forEach(function(k){ obj[k]=Number($('cfg_'+k).value)||0; });
+      google.script.run.withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res||!res.success){ toast((res&&res.error)||'Lưu thất bại.', true); return; }
+        invalidatePayCache(); toast('Đã lưu cấu hình chung'); state.payCfg.chung = obj;
+      }).withFailureHandler(onFailure).saveThuongChung(AUTH.token, obj);
+    };
+  }
+
+  /* ===================== NHÂN SỰ LƯƠNG CỨNG (Owner) — tab Quản lý =====================
+   * Container HTML có sẵn trong Index.html: #fixedStaffCard (trong tab-manage), gồm:
+   *   fs_name, fs_role (input thêm), fs_addBtn, fs_search, fixedStaffList, fixedStaffCount
+   */
+  function renderFixedStaffList(){
+    var card = $('fixedStaffCard'); if(!card) return;
+    card.style.display = (AUTH.role === 'owner') ? '' : 'none';
+    if(AUTH.role !== 'owner') return;
+    google.script.run.withSuccessHandler(function(res){
+      if(authGate(res)) return;
+      if(!res || !res.success){ toast((res && res.error) || 'Không tải được nhân sự lương cứng.', true); return; }
+      state.luongCungStaffAll = res.data || [];
+      if($('fixedStaffCount')) $('fixedStaffCount').textContent = state.luongCungStaffAll.length ? state.luongCungStaffAll.length : '';
+      renderFixedStaffListFiltered();
+    }).withFailureHandler(onFailure).listLuongCungStaff(AUTH.token);
+  }
+  function renderFixedStaffListFiltered(){
+    var el = $('fixedStaffList'); if(!el) return;
+    var term = $('fs_search') ? $('fs_search').value.trim().toLowerCase() : '';
+    var list = (state.luongCungStaffAll||[]).filter(function(s){
+      if(!term) return true;
+      return (s.name+' '+(s.role||'')).toLowerCase().indexOf(term) >= 0;
+    });
+    if(!list.length){ el.innerHTML = '<span class="staff-empty">Chưa có nhân sự lương cứng nào.</span>'; return; }
+    el.innerHTML = list.map(function(s){
+      return '<div class="staff-row" data-fsname="'+esc(s.name)+'">'
+        + '<span class="staff-row-name">'+esc(s.name)+(s.role?(' <span class="kdim">· '+esc(s.role)+'</span>'):'')+'</span>'
+        + (s.status==='active' ? '<span class="pill" style="background:#d6f4ee;color:#0c8c79">Đang nhận</span>' : '<span class="pill" style="background:var(--field);color:var(--text-faint)">Tạm dừng</span>')
+        + '<button class="staff-row-merge fs-toggle" title="'+(s.status==='active'?'Tạm dừng':'Kích hoạt')+'">'+(s.status==='active'?'⏸':'▶')+'</button>'
+        + '<button class="staff-row-del fs-del" title="Xoá">✕</button>'
+        + '</div>';
+    }).join('');
+    Array.prototype.forEach.call(el.querySelectorAll('.fs-toggle'), function(b){
+      b.onclick = function(){
+        var row = b.closest('[data-fsname]'); var name = row.getAttribute('data-fsname');
+        var s = (state.luongCungStaffAll||[]).filter(function(x){ return x.name===name; })[0];
+        var newStatus = (s && s.status==='active') ? 'inactive' : 'active';
+        google.script.run.withSuccessHandler(function(r){
+          if(authGate(r)) return;
+          if(!r||!r.success){ toast((r&&r.error)||'Cập nhật thất bại.', true); return; }
+          toast('Đã cập nhật trạng thái.');
+          renderFixedStaffList();
+        }).withFailureHandler(onFailure).updateLuongCungStaff(AUTH.token, name, null, null, newStatus);
+      };
+    });
+    Array.prototype.forEach.call(el.querySelectorAll('.fs-del'), function(b){
+      b.onclick = function(){
+        var row = b.closest('[data-fsname]'); var name = row.getAttribute('data-fsname');
+        confirmDialog('Xoá nhân sự lương cứng "'+name+'"?\n(Toàn bộ lương cứng theo tháng của người này sẽ bị xoá.)', function(){
+          overlay(true);
+          google.script.run.withSuccessHandler(function(r){
+            overlay(false);
+            if(authGate(r)) return;
+            if(!r||!r.success){ toast((r&&r.error)||'Xoá thất bại.', true); return; }
+            toast('Đã xoá.');
+            renderFixedStaffList();
+          }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).deleteLuongCungStaff(AUTH.token, name);
+        }, {danger:true, okText:'Xoá'});
+      };
+    });
+  }
+  function addFixedStaffUI(){
+    var name = $('fs_name').value.trim();
+    var role = $('fs_role').value.trim();
+    if(!name){ toast('Nhập tên nhân sự.', true); return; }
+    overlay(true);
+    google.script.run.withSuccessHandler(function(res){
+      overlay(false);
+      if(authGate(res)) return;
+      if(!res||!res.success){ toast((res&&res.error)||'Thêm thất bại.', true); return; }
+      toast('Đã thêm "'+name+'".');
+      $('fs_name').value=''; $('fs_role').value='';
+      renderFixedStaffList();
+    }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).addLuongCungStaff(AUTH.token, name, role, '');
+  }
+
+  /* ===================== LƯƠNG CỨNG THEO THÁNG (Owner) — subtab "Lương cứng" =====================
+   * Container HTML có sẵn: #payView-fixed > #fixedMonth, #fixedSaveBtn, #fixedSalaryList
+   * Mỗi nhân sự lương cứng ACTIVE hiện 1 card (.fixed-emp-card): tên+vai trò+tổng, danh sách
+   * dòng theo kênh (.fixed-chan-row), và 1 dropdown "+ Thêm kênh" (.fixed-add-chan-select).
+   */
+  /** Trả về tháng liền trước dạng "yyyy-MM". */
+  function prevMonthStr(m){
+    var p = String(m||'').split('-');
+    var y = Number(p[0]), mo = Number(p[1]);
+    if(!y || !mo) return '';
+    mo -= 1;
+    if(mo < 1){ mo = 12; y -= 1; }
+    return y + '-' + ('0'+mo).slice(-2);
+  }
+
+  function renderFixedSalaryMonth(){
+    if(AUTH.role !== 'owner') return;
+    var month = $('fixedMonth') ? $('fixedMonth').value : '';
+    if(!month){ if($('fixedMonth')){ $('fixedMonth').value = curMonthStr(); month = curMonthStr(); } }
+    if(!month) return;
+    google.script.run.withSuccessHandler(function(sres){
+      if(authGate(sres)) return;
+      state.luongCungStaff = (sres && sres.success) ? (sres.data||[]).filter(function(s){ return s.status==='active'; }) : [];
+      google.script.run.withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Không tải được lương cứng.', true); return; }
+        var data = res.data || [];
+        if(data.length){
+          // Tháng này đã có dữ liệu đã lưu -> hiển thị đúng như đã lưu
+          renderFixedSalaryCards(data, false);
+          return;
+        }
+        // Tháng này CHƯA có gì -> lấy mặc định từ tháng trước để xem trước, chưa lưu
+        var prevMonth = prevMonthStr(month);
+        if(!prevMonth){ renderFixedSalaryCards([], false); return; }
+        google.script.run
+          .withSuccessHandler(function(pres){
+            if(authGate(pres)) return;
+            var prevData = (pres && pres.success) ? (pres.data||[]) : [];
+            renderFixedSalaryCards(prevData, prevData.length > 0);
+          })
+          .withFailureHandler(function(){ renderFixedSalaryCards([], false); })
+          .getLuongCungByMonth(AUTH.token, prevMonth);
+      }).withFailureHandler(onFailure).getLuongCungByMonth(AUTH.token, month);
+    }).withFailureHandler(onFailure).listLuongCungStaff(AUTH.token);
+  }
+  function fixedChanRowHTML(r){
+    r = r || {};
+    return '<div class="fixed-chan-row" data-chan="'+esc(r.channel||'')+'">'
+      + '<span class="fixed-chan-name"><span class="dot" style="background:'+channelColor(r.channel)+'"></span>'+esc(r.channel)+'</span>'
+      + '<input type="text" inputmode="numeric" class="numfmt fixed-chan-amount" value="'+fmtThousand(r.amount||0)+'">'
+      + '<input type="text" class="fixed-chan-note" value="'+esc(r.note||'')+'" placeholder="Ghi chú">'
+      + '<button class="fixed-remove-btn" type="button">✕</button>'
+      + '</div>';
+  }
+  /** copiedFromPrev=true khi dữ liệu đang hiện là MẶC ĐỊNH lấy từ tháng trước (chưa lưu cho tháng này). */
+  function renderFixedSalaryCards(monthData, copiedFromPrev){
+    var el = $('fixedSalaryList'); if(!el) return;
+    if(!state.luongCungStaff.length){
+      el.innerHTML = '<div class="card"><div class="empty"><div class="big">💼</div>Chưa có nhân sự lương cứng đang hoạt động. Thêm ở tab <b>Quản lý</b>.</div></div>';
+      return;
+    }
+    var banner = copiedFromPrev
+      ? '<div class="cfg-empty-hint" style="margin-bottom:14px;">💡 Tháng này chưa có dữ liệu — đang hiển thị <b>mặc định lấy từ tháng trước</b>. Chỉnh sửa nếu cần rồi bấm <b>Lưu lương cứng tháng</b> để áp dụng cho tháng này.</div>'
+      : '';
+    var byName = {};
+    monthData.forEach(function(r){
+      var k = String(r.name).toLowerCase();
+      (byName[k] = byName[k] || []).push(r);
+    });
+    el.innerHTML = banner + state.luongCungStaff.map(function(s){
+      var rows = byName[s.name.toLowerCase()] || [];
+      var total = rows.reduce(function(sum, r){ return sum + (Number(r.amount)||0); }, 0);
+      var rowsHtml = rows.length ? rows.map(fixedChanRowHTML).join('') : '<p class="hint" style="margin:4px 0 8px;">Chưa có kênh nào — chọn bên dưới để thêm.</p>';
+      var usedChans = {}; rows.forEach(function(r){ if(r.channel) usedChans[r.channel] = true; });
+      var addOpts = '<option value="">+ Thêm kênh…</option>' + (state.channels||[]).filter(function(c){ return !usedChans[c]; }).map(function(c){ return '<option value="'+esc(c)+'">'+esc(c)+'</option>'; }).join('');
+      return '<div class="fixed-emp-card" data-name="'+esc(s.name)+'">'
+        + '<div class="fixed-emp-head">'
+          + '<div><span class="fixed-emp-name">'+esc(s.name)+'</span>'+(s.role?('<span class="fixed-emp-role">'+esc(s.role)+'</span>'):'')+'</div>'
+          + '<div class="fixed-emp-total">'+fmtVND(total)+'đ</div>'
+        + '</div>'
+        + '<div class="fixed-chan-rows">'+rowsHtml+'</div>'
+        + '<select class="fixed-add-chan-select">'+addOpts+'</select>'
+        + '</div>';
+    }).join('');
+    bindFixedCardEvents();
+  }
+  function bindFixedCardEvents(){
+    var el = $('fixedSalaryList'); if(!el) return;
+    Array.prototype.forEach.call(el.querySelectorAll('.fixed-emp-card'), function(card){
+      bindFixedCardRows(card);
+      var sel = card.querySelector('.fixed-add-chan-select');
+      if(sel) sel.onchange = function(){
+        var ch = sel.value; if(!ch) return;
+        var rowsWrap = card.querySelector('.fixed-chan-rows');
+        var hintEl = rowsWrap.querySelector('.hint'); if(hintEl) hintEl.remove();
+        rowsWrap.insertAdjacentHTML('beforeend', fixedChanRowHTML({channel:ch, amount:0, note:''}));
+        bindFixedRowRemove(rowsWrap.lastElementChild, card);
+        refreshFixedAddSelect(card);
+        sel.value = '';
+      };
+    });
+  }
+  function bindFixedCardRows(card){
+    Array.prototype.forEach.call(card.querySelectorAll('.fixed-chan-row'), function(row){
+      bindFixedRowRemove(row, card);
+    });
+  }
+  function bindFixedRowRemove(row, card){
+    var b = row.querySelector('.fixed-remove-btn');
+    if(b) b.onclick = function(){ row.remove(); updateFixedCardTotal(card); refreshFixedAddSelect(card); };
+    var inp = row.querySelector('.fixed-chan-amount');
+    if(inp) inp.addEventListener('input', function(){ updateFixedCardTotal(card); });
+  }
+  function updateFixedCardTotal(card){
+    if(!card) return;
+    var total = 0;
+    Array.prototype.forEach.call(card.querySelectorAll('.fixed-chan-amount'), function(inp){ total += unfmtNum(inp.value); });
+    var totalEl = card.querySelector('.fixed-emp-total');
+    if(totalEl) totalEl.textContent = fmtVND(total)+'đ';
+  }
+  function refreshFixedAddSelect(card){
+    var used = {};
+    Array.prototype.forEach.call(card.querySelectorAll('.fixed-chan-row'), function(row){
+      var ch = row.getAttribute('data-chan'); if(ch) used[ch] = true;
+    });
+    var sel = card.querySelector('.fixed-add-chan-select');
+    if(!sel) return;
+    sel.innerHTML = '<option value="">+ Thêm kênh…</option>' + (state.channels||[]).filter(function(c){ return !used[c]; }).map(function(c){ return '<option value="'+esc(c)+'">'+esc(c)+'</option>'; }).join('');
+  }
+  function saveFixedSalaryMonthUI(){
+    var month = $('fixedMonth') ? $('fixedMonth').value : ''; if(!month) return;
+    var listEl = $('fixedSalaryList'); if(!listEl) return;
+    var items = [];
+    Array.prototype.forEach.call(listEl.querySelectorAll('.fixed-emp-card'), function(card){
+      var name = card.getAttribute('data-name');
+      Array.prototype.forEach.call(card.querySelectorAll('.fixed-chan-row'), function(row){
+        var ch = row.getAttribute('data-chan');
+        if(!ch) return;
+        var amount = unfmtNum(row.querySelector('.fixed-chan-amount').value);
+        var note = row.querySelector('.fixed-chan-note').value.trim();
+        items.push({ name: name, channel: ch, amount: amount, note: note });
+      });
+    });
+    overlay(true);
+    google.script.run.withSuccessHandler(function(res){
+      overlay(false);
+      if(authGate(res)) return;
+      if(!res||!res.success){ toast((res&&res.error)||'Lưu thất bại.', true); return; }
+      invalidatePayCache();
+      toast('Đã lưu lương cứng tháng.');
+      renderFixedSalaryMonth();
+      if($('tab-payroll') && $('tab-payroll').style.display!=='none') calcPayroll();
+    }).withFailureHandler(function(e){ overlay(false); onFailure(e); }).saveLuongCungBatch(AUTH.token, month, items);
+  }
+
+
+  /* ===================== XUẤT EXCEL (.xlsx) =====================
+   * Xuất dữ liệu ĐANG LỌC ra file Excel 4 sheet để dễ kiểm tra:
+   *   - Chi tiết:     mọi ca (14 cột)
+   *   - Theo ngày:    tổng hợp theo ngày (chỉ tính Host cho doanh số)
+   *   - Theo nhân sự: tổng hợp theo nhân sự, xếp GMV giảm dần
+   *   - Theo kênh:    tổng hợp theo kênh, xếp doanh số giảm dần
+   * Yêu cầu: thư viện SheetJS đã được nạp ở Index.html (biến XLSX toàn cục).
+   */
+  function exportXLSX(){
+    var rows = getFiltered();
+    if(!rows.length){ toast('Không có dữ liệu để xuất.', true); return; }
+    if(typeof XLSX === 'undefined'){
+      toast('Thư viện Excel chưa tải xong. Hãy tải lại trang (⌘+Shift+R) rồi thử lại.', true);
+      return;
+    }
+    var dayName = ['CN','T2','T3','T4','T5','T6','T7'];
+    var wb = XLSX.utils.book_new();
+
+    // ── SHEET 1: Chi tiết ca live ─────────────────────────────
+    var detHead = ['Ngày','Thứ','Loại ngày','Tên nhân sự','Vị trí','Kênh',
+                   'Bắt đầu','Kết thúc','Giờ live','GMV đầu ca','GMV cuối ca','GMV ghi nhận','Ghi chú','Trạng thái'];
+    var detData = [detHead];
+    rows.forEach(function(r){
+      var d = new Date(r.date + 'T00:00:00');
+      var wd = isNaN(d.getTime()) ? '' : dayName[d.getDay()];
+      var dt = dayType(r.date);
+      detData.push([
+        r.date, wd, dt ? dt.label : '',
+        r.name, r.position, r.channel,
+        r.start, r.end || '',
+        Number(r.hours) || 0,
+        Number(r.gmvStart) || 0,
+        Number(r.gmvEnd) || 0,
+        Number(r.gmv) || 0,
+        r.note || '',
+        r.open ? 'Đang live' : 'Đã xong'
+      ]);
+    });
+    var ws1 = XLSX.utils.aoa_to_sheet(detData);
+    ws1['!cols'] = [
+      {wch:12},{wch:5},{wch:12},{wch:22},{wch:14},{wch:18},
+      {wch:8},{wch:8},{wch:9},{wch:14},{wch:14},{wch:14},{wch:26},{wch:11}
+    ];
+    ws1['!autofilter'] = { ref: XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:detData.length-1, c:detHead.length-1} }) };
+    applyNumFmt_(ws1, ['I'], '#,##0.00');
+    applyNumFmt_(ws1, ['J','K','L'], '#,##0');
+    XLSX.utils.book_append_sheet(wb, ws1, 'Chi tiết');
+
+    // ── SHEET 2: Tổng theo ngày ──────────────────────────────
+    // Doanh số & giờ Host = chỉ tính vị trí Host Live (giống UI Tổng quan)
+    var byDay = {};
+    rows.forEach(function(r){
+      if(r.open) return; // bỏ qua ca đang mở (chưa kết thúc)
+      var d = byDay[r.date] = byDay[r.date] || {shifts:0, hostHours:0, hostGmv:0, chans:{}, totalGmv:0};
+      d.shifts++;
+      d.totalGmv += Number(r.gmv) || 0;
+      if(String(r.position).toLowerCase().indexOf('host') >= 0){
+        d.hostHours += Number(r.hours) || 0;
+        d.hostGmv += Number(r.gmv) || 0;
+      }
+      d.chans[r.channel] = true;
+    });
+    var dayHead = ['Ngày','Thứ','Loại ngày','Số ca','Giờ live chính (Host)','Doanh số (Host)','GMV/giờ','Số kênh live'];
+    var dayData = [dayHead];
+    Object.keys(byDay).sort().forEach(function(date){
+      var d = byDay[date];
+      var dObj = new Date(date + 'T00:00:00');
+      var wd = isNaN(dObj.getTime()) ? '' : dayName[dObj.getDay()];
+      var dt = dayType(date);
+      dayData.push([
+        date, wd, dt ? dt.label : '',
+        d.shifts,
+        Math.round(d.hostHours * 100) / 100,
+        d.hostGmv,
+        d.hostHours ? Math.round(d.hostGmv/d.hostHours) : 0,
+        Object.keys(d.chans).length
+      ]);
+    });
+    var ws2 = XLSX.utils.aoa_to_sheet(dayData);
+    ws2['!cols'] = [{wch:12},{wch:5},{wch:12},{wch:8},{wch:20},{wch:16},{wch:14},{wch:11}];
+    ws2['!autofilter'] = { ref: XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:dayData.length-1, c:dayHead.length-1} }) };
+    applyNumFmt_(ws2, ['E'], '#,##0.00');
+    applyNumFmt_(ws2, ['F','G'], '#,##0');
+    XLSX.utils.book_append_sheet(wb, ws2, 'Theo ngày');
+
+    // ── SHEET 3: Tổng theo nhân sự ────────────────────────────
+    var byStaff = {};
+    rows.forEach(function(r){
+      if(r.open) return;
+      var s = byStaff[r.name] = byStaff[r.name] || {shifts:0, hours:0, gmv:0, chans:{}};
+      s.shifts++;
+      s.hours += Number(r.hours) || 0;
+      s.gmv += Number(r.gmv) || 0;
+      s.chans[r.channel] = true;
+    });
+    var staffHead = ['Tên nhân sự','Số ca','Tổng giờ','Tổng GMV','GMV/giờ (TB)','Số kênh làm'];
+    var staffData = [staffHead];
+    Object.keys(byStaff).sort(function(a,b){ return byStaff[b].gmv - byStaff[a].gmv; }).forEach(function(name){
+      var s = byStaff[name];
+      staffData.push([
+        name, s.shifts,
+        Math.round(s.hours * 100) / 100,
+        s.gmv,
+        s.hours ? Math.round(s.gmv/s.hours) : 0,
+        Object.keys(s.chans).length
+      ]);
+    });
+    var ws3 = XLSX.utils.aoa_to_sheet(staffData);
+    ws3['!cols'] = [{wch:24},{wch:8},{wch:11},{wch:15},{wch:14},{wch:11}];
+    ws3['!autofilter'] = { ref: XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:staffData.length-1, c:staffHead.length-1} }) };
+    applyNumFmt_(ws3, ['C'], '#,##0.00');
+    applyNumFmt_(ws3, ['D','E'], '#,##0');
+    XLSX.utils.book_append_sheet(wb, ws3, 'Theo nhân sự');
+
+    // ── SHEET 4: Tổng theo kênh ───────────────────────────────
+    var byChan = {};
+    rows.forEach(function(r){
+      if(r.open) return;
+      var c = byChan[r.channel] = byChan[r.channel] || {shifts:0, hostHours:0, hostGmv:0, staffs:{}};
+      c.shifts++;
+      if(String(r.position).toLowerCase().indexOf('host') >= 0){
+        c.hostHours += Number(r.hours) || 0;
+        c.hostGmv += Number(r.gmv) || 0;
+      }
+      c.staffs[r.name] = true;
+    });
+    var chanHead = ['Kênh','Số ca','Giờ Host','Doanh số (Host)','GMV/giờ','Số nhân sự'];
+    var chanData = [chanHead];
+    Object.keys(byChan).sort(function(a,b){ return byChan[b].hostGmv - byChan[a].hostGmv; }).forEach(function(ch){
+      var c = byChan[ch];
+      chanData.push([
+        ch, c.shifts,
+        Math.round(c.hostHours * 100) / 100,
+        c.hostGmv,
+        c.hostHours ? Math.round(c.hostGmv/c.hostHours) : 0,
+        Object.keys(c.staffs).length
+      ]);
+    });
+    var ws4 = XLSX.utils.aoa_to_sheet(chanData);
+    ws4['!cols'] = [{wch:20},{wch:8},{wch:11},{wch:16},{wch:14},{wch:11}];
+    ws4['!autofilter'] = { ref: XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:chanData.length-1, c:chanHead.length-1} }) };
+    applyNumFmt_(ws4, ['C'], '#,##0.00');
+    applyNumFmt_(ws4, ['D','E'], '#,##0');
+    XLSX.utils.book_append_sheet(wb, ws4, 'Theo kênh');
+
+    // ── Tên file: gắn theo kỳ + kênh + tên đang lọc ──────────
+    var period = $('filterPeriod').value;
+    var chFil = $('filterChannel').value;
+    var nmFil = $('filterName').value.trim();
+    var parts = ['ca-live'];
+    if(period === 'today') parts.push('hom-nay');
+    else if(period === 'week') parts.push('tuan-nay');
+    else if(period === 'month') parts.push('thang-nay');
+    else if(period === 'custom'){
+      var f = $('filterFrom').value, t = $('filterTo').value;
+      if(f || t) parts.push((f || '').replace(/-/g,'') + '-' + (t || '').replace(/-/g,''));
+    } else parts.push('tat-ca');
+    if(chFil) parts.push(chFil.replace(/\s+/g,'-'));
+    if(nmFil) parts.push(nmFil.replace(/\s+/g,'-'));
+    var fname = parts.join('_') + '_xuat-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.xlsx';
+    // Loại bỏ ký tự không hợp lệ trên tên file
+    fname = fname.replace(/[\/\\:*?"<>|]/g, '');
+
+    XLSX.writeFile(wb, fname);
+    toast('✓ Đã xuất ' + rows.length + ' ca ra file "' + fname + '"');
+  }
+
+  // Đặt định dạng số cho 1 dải cột (áp từ dòng 2 trở đi để chừa header).
+  function applyNumFmt_(ws, cols, fmt){
+    if(!ws['!ref']) return;
+    var range = XLSX.utils.decode_range(ws['!ref']);
+    for(var R = 1; R <= range.e.r; R++){
+      for(var i = 0; i < cols.length; i++){
+        var addr = cols[i] + (R + 1);
+        var cell = ws[addr];
+        if(cell && cell.t === 'n') cell.z = fmt;
+      }
+    }
+  }
+
+  /* ===================== TÀI KHOẢN (Owner) ===================== */
+  function loadUsers(){
+    google.script.run
+      .withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Không tải được tài khoản.', true); return; }
+        usersCache = res.data || [];
+        if($('tab-users').style.display !== 'none') renderUsers();
+      })
+      .withFailureHandler(onFailure)
+      .listUsers(AUTH.token);
+  }
+
+  function refreshUserFormOptions(){
+    if(!$('nu_channel')) return;
+    $('nu_channel').innerHTML = state.channels.map(function(n){
+      return '<label class="chk"><input type="checkbox" value="'+esc(n)+'"> '+esc(n)+'</label>';
+    }).join('') || '<span style="color:var(--text-faint);font-size:13px">Chưa có kênh nào.</span>';
+    $('nu_staff').innerHTML = '<option value="">— Chọn nhân sự —</option>' +
+      state.staff.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join('');
+    if($('nu_managed')){
+      $('nu_managed').innerHTML = state.channels.map(function(n){
+        return '<label class="chk"><input type="checkbox" value="'+esc(n)+'"> '+esc(n)+'</label>';
+      }).join('') || '<span style="color:var(--text-faint);font-size:13px">Chưa có kênh nào.</span>';
+    }
+  }
+  function selectedNuManaged(){
+    if(!$('nu_managed')) return [];
+    return Array.prototype.slice.call($('nu_managed').querySelectorAll('input:checked')).map(function(c){ return c.value; });
+  }
+
+  function selectedNuChannels(){
+    return Array.prototype.slice.call($('nu_channel').querySelectorAll('input:checked')).map(function(c){ return c.value; });
+  }
+
+  function onRoleChange(){
+    var r = $('nu_role').value;
+    $('nu_channelWrap').style.display = (r==='lead' || r==='staff') ? '' : 'none';
+    if($('nu_channelLabel')){
+      $('nu_channelLabel').textContent = r==='lead' ? 'Kênh phụ trách (chọn nhiều)' : 'Kênh được làm (chọn nhiều)';
+    }
+    $('nu_staffWrap').style.display = (r==='staff') ? '' : 'none';
+    // Quyền Lead Live (kênh quản lý) chỉ áp cho Nhân viên; Lead không gán được
+    if($('nu_managedWrap')) $('nu_managedWrap').style.display = (r==='staff' && !PERM.usersLimited) ? '' : 'none';
+  }
+
+  function renderUsers(){
+    if(!PERM.manageUsers) return;
+    refreshUserFormOptions();
+    // Lead: khoá vai trò = Nhân viên, ẩn lựa chọn vai trò & kênh
+    if(PERM.usersLimited){
+      $('nu_role').value = 'staff';
+      $('nu_roleWrap').style.display = 'none';
+      if($('nu_hint')) $('nu_hint').textContent = 'Tạo tài khoản đăng nhập cho nhân sự thuộc kênh bạn quản lý. Mật khẩu được mã hoá khi lưu.';
+      if($('toggleCreateUser')) $('toggleCreateUser').style.display = '';
+    } else {
+      $('nu_roleWrap').style.display = '';
+      if($('toggleCreateUser')) $('toggleCreateUser').style.display = '';
+    }
+    onRoleChange();
+    var term = $('userSearch') ? $('userSearch').value.trim().toLowerCase() : '';
+    var list = usersCache.filter(function(u){
+      if(!term) return true;
+      var hay = [u.username, roleLabel(u.role), u.staff, String(u.channel).split('|').join(' ')].join(' ').toLowerCase();
+      return hay.indexOf(term) >= 0;
+    });
+    var rows = list.map(function(u){
+      var chan = u.channel ? esc(String(u.channel).split('|').join(', ')) : '<span style="color:var(--text-faint)">—</span>';
+      var staff = u.staff ? esc(u.staff) : '<span style="color:var(--text-faint)">—</span>';
+      var isMe = u.username.toLowerCase() === String(AUTH.username).toLowerCase();
+      var mng = String(u.managed||'').split('|').filter(function(c){ return c.trim(); });
+      var leadBadge = (u.role==='staff' && mng.length)
+        ? ' <span class="pill" style="background:#fff3d6;color:#9a6a00" title="Nhân viên này đang là Lead Live, quản lý: '+esc(mng.join(', '))+'">👑 Lead Live: '+esc(mng.join(', '))+'</span>'
+        : '';
+      var acts = '<button class="act" data-edu="'+esc(u.username)+'" title="'+(PERM.usersLimited?'Sửa kênh':'Sửa vai trò / phạm vi')+'">✎</button>'
+        + ((isMe || PERM.usersLimited) ? '' :
+            '<button class="act" data-rst="'+esc(u.username)+'" title="Đặt lại mật khẩu">🔑</button>'
+          + '<button class="act del" data-delu="'+esc(u.username)+'" title="Xoá tài khoản">✕</button>');
+      return '<tr><td><b>'+esc(u.username)+'</b>'+(isMe?' <span class="pill la" style="font-size:10px">bạn</span>':'')+'</td>'
+        + '<td><span class="pill '+roleCls(u.role)+'">'+roleLabel(u.role)+'</span>'+leadBadge+'</td>'
+        + '<td>'+staff+'</td>'
+        + '<td>'+chan+'</td>'
+        + '<td style="text-align:right;white-space:nowrap">'+acts+'</td></tr>';
+    }).join('');
+    $('usersBody').innerHTML = rows || '<tr><td colspan="5" style="color:var(--text-faint)">'+(term?'Không tìm thấy tài khoản phù hợp.':'Chưa có tài khoản.')+'</td></tr>';
+    Array.prototype.forEach.call($('usersBody').querySelectorAll('[data-edu]'), function(b){ b.onclick = function(){ startEditUser(b.getAttribute('data-edu')); }; });
+    Array.prototype.forEach.call($('usersBody').querySelectorAll('[data-rst]'), function(b){ b.onclick = function(){ resetPwUI(b.getAttribute('data-rst')); }; });
+    Array.prototype.forEach.call($('usersBody').querySelectorAll('[data-delu]'), function(b){ b.onclick = function(){ deleteUserUI(b.getAttribute('data-delu')); }; });
+  }
+
+  function startEditUser(username){
+    var u = usersCache.filter(function(x){ return x.username === username; })[0];
+    if(!u) return;
+    editingUser = username;
+    $('userFormTitle').textContent = 'Sửa tài khoản: ' + username;
+    $('nu_userWrap').style.display = 'none';     // không đổi tên đăng nhập
+    $('nu_passWrap').style.display = 'none';     // mật khẩu đổi qua nút 🔑
+    // Lead chỉ được sửa KÊNH -> khoá vai trò & nhân sự
+    $('nu_roleWrap').style.display = PERM.usersLimited ? 'none' : '';
+    $('nu_role').value = u.role;
+    $('nu_createBtn').textContent = 'Lưu thay đổi';
+    $('nu_cancelBtn').style.display = '';
+    refreshUserFormOptions();
+    if(u.role === 'lead' || u.role === 'staff'){
+      var mine = {}; String(u.channel).split('|').forEach(function(c){ mine[c.trim().toLowerCase()] = true; });
+      Array.prototype.forEach.call($('nu_channel').querySelectorAll('input'), function(c){ c.checked = !!mine[c.value.toLowerCase()]; });
+    }
+    if(u.role === 'staff'){ $('nu_staff').value = u.staff; }
+    if($('nu_newStaff')) $('nu_newStaff').value = '';
+    if($('nu_managed')){
+      var mng = {}; String(u.managed||'').split('|').forEach(function(c){ mng[c.trim().toLowerCase()] = true; });
+      Array.prototype.forEach.call($('nu_managed').querySelectorAll('input'), function(c){ c.checked = !!mng[c.value.toLowerCase()]; });
+    }
+    onRoleChange();
+    if(PERM.usersLimited){ $('nu_channelWrap').style.display = ''; $('nu_staffWrap').style.display = 'none'; } // Lead: chỉ kênh
+    if($('userFormCard')) $('userFormCard').style.display = '';
+    $('userFormCard').scrollIntoView({behavior:'smooth', block:'start'});
+  }
+
+  function cancelEditUser(){
+    editingUser = null;
+    $('userFormTitle').textContent = 'Tạo tài khoản';
+    $('nu_userWrap').style.display = '';
+    $('nu_passWrap').style.display = '';
+    $('nu_user').value = ''; $('nu_pass').value = '';
+    if($('nu_newStaff')) $('nu_newStaff').value = '';
+    if($('nu_staff')) $('nu_staff').selectedIndex = 0;
+    // Bỏ chọn toàn bộ kênh làm việc + kênh quản lý (tránh "lẫn" sang tài khoản mới)
+    if($('nu_channel')) Array.prototype.forEach.call($('nu_channel').querySelectorAll('input'), function(c){ c.checked = false; });
+    if($('nu_managed')) Array.prototype.forEach.call($('nu_managed').querySelectorAll('input'), function(c){ c.checked = false; });
+    $('nu_createBtn').textContent = 'Tạo tài khoản';
+    if($('userFormCard')) $('userFormCard').style.display = 'none';
+    onRoleChange();
+  }
+
+  function openCreateUserForm(){
+    cancelEditUser();              // reset về chế độ tạo mới
+    $('userFormCard').style.display = '';
+    refreshUserFormOptions();
+    onRoleChange();
+    $('userFormCard').scrollIntoView({behavior:'smooth', block:'start'});
+  }
+
+  function submitUserForm(){
+    var role = PERM.usersLimited ? 'staff' : $('nu_role').value;
+    var channels = (role==='lead' || role==='staff') ? selectedNuChannels().join('|') : '';
+    var managed = (role==='staff' && !PERM.usersLimited) ? selectedNuManaged().join('|') : '';
+    var newStaff = $('nu_newStaff') ? $('nu_newStaff').value.trim() : '';
+    var staff = newStaff || $('nu_staff').value;
+    if(role==='lead' && !channels){ toast('Chọn ít nhất 1 kênh cho Lead.', true); return; }
+    if(role==='staff' && !staff){ toast('Chọn nhân sự cho tài khoản nhân viên.', true); return; }
+
+    if(editingUser){
+      overlay(true);
+      google.script.run
+        .withSuccessHandler(function(res){
+          overlay(false);
+          if(authGate(res)) return;
+          if(!res || !res.success){ toast((res && res.error) || 'Cập nhật thất bại.', true); return; }
+          toast('Đã cập nhật tài khoản "'+editingUser+'".');
+          cancelEditUser();
+          loadUsers();
+        })
+        .withFailureHandler(onFailure)
+        .updateUser(AUTH.token, editingUser, role, channels, staff, managed);
+      return;
+    }
+
+    var u = $('nu_user').value.trim();
+    var p = $('nu_pass').value;
+    if(!u || !p){ toast('Nhập tên đăng nhập và mật khẩu.', true); return; }
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Tạo tài khoản thất bại.', true); return; }
+        toast('Đã tạo tài khoản "'+u+'".');
+        $('nu_user').value=''; $('nu_pass').value=''; if($('nu_newStaff')) $('nu_newStaff').value='';
+        if($('userFormCard')) $('userFormCard').style.display='none';
+        if($('usersListCard')) $('usersListCard').style.display='';
+        loadUsers();
+      })
+      .withFailureHandler(onFailure)
+      .createUser(AUTH.token, u, p, role, channels, staff, managed);
+  }
+
+  function resetPwUI(username){
+    var np = prompt('Mật khẩu mới cho "'+username+'" (tối thiểu 4 ký tự):');
+    if(np===null) return;
+    google.script.run
+      .withSuccessHandler(function(res){
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Đặt lại mật khẩu thất bại.', true); return; }
+        toast('Đã đặt lại mật khẩu cho "'+username+'".');
+      })
+      .withFailureHandler(onFailure)
+      .resetPassword(AUTH.token, username, np);
+  }
+
+  function deleteUserUI(username){
+    var msg = 'Xoá tài khoản đăng nhập "'+username+'"?\n\n'
+      + '• Dữ liệu ca live và lương KHÔNG bị xoá (lưu theo tên Nhân sự).\n'
+      + '• Để khôi phục: tạo lại tài khoản và gắn đúng Nhân sự cũ.';
+    confirmDialog(msg, function(){
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Xoá tài khoản thất bại.', true); return; }
+        toast('Đã xoá tài khoản.');
+        loadUsers();
+      })
+      .withFailureHandler(onFailure)
+      .deleteUser(AUTH.token, username);
+    }, {title:'Xoá tài khoản', danger:true, okText:'Xoá tài khoản'});
+  }
+
+  function importMode(){
+    var r = document.querySelector('input[name="importMode"]:checked');
+    return r ? r.value : 'times';
+  }
+  function onImportModeChange(){
+    var m = importMode();
+    if(m === 'times'){
+      $('importHint').innerHTML = 'Dán dữ liệu từ Excel (mỗi dòng 1 ca). Thứ tự cột: <b>Ngày · Tên · Kênh · Vị trí · Bắt đầu · Kết thúc · GMV</b>. Giờ dạng 19:00. Ca qua đêm (vd 22:00→01:00) hệ thống tự hiểu.';
+      $('importBox').placeholder = '2026-05-01\tNhân viên Test\tTest\tHost Live\t19:00\t22:00\t10000000\n2026-05-02\tNhân viên Test\tGooby Vietnam\tHost Live\t20:00\t23:30\t7500000';
+    } else {
+      $('importHint').innerHTML = 'Dán dữ liệu từ Excel (mỗi dòng 1 ca). Thứ tự cột: <b>Ngày · Tên · Kênh · Vị trí · Giờ live · GMV</b>. Giờ live là số (vd 3 hoặc 2.5).';
+      $('importBox').placeholder = '2026-05-01\tNhân viên Test\tTest\tHost Live\t3\t10000000\n2026-05-02\tNhân viên Test\tGooby Vietnam\tHost Live\t2.5\t7500000';
+    }
+  }
+
+  function previewImportUI(){
+    var text = ($('importBox').value || '').trim();
+    if(!text){ toast('Hãy dán dữ liệu vào ô trước.', true); return; }
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Không đọc được dữ liệu.', true); $('importPreview').style.display='none'; return; }
+        renderImportPreview(res);
+      })
+      .withFailureHandler(function(e){ overlay(false); onFailure(e); })
+      .previewImport(AUTH.token, text, importMode());
+  }
+  function renderImportPreview(res){
+    importNameMapping = {}; // reset mỗi lần preview
+
+    // Với mỗi NV mới, tìm gợi ý từ danh sách nhân sự đang có
+    var employeesWithSug = [];
+    (res.employees || []).forEach(function(e){
+      if(e.isNew){
+        var sug = findSimilarStaff(e.name, state.staff || []);
+        if(sug.length){
+          e.suggestions = sug;
+          employeesWithSug.push(e);
+          // Auto-select gợi ý hàng đầu nếu điểm ≥ 85 (rất giống)
+          if(sug[0].score >= 85){
+            importNameMapping[e.name] = sug[0].name;
+          }
+        }
+      }
+    });
+
+    var h = '<div class="card" style="background:var(--field);box-shadow:none">';
+    h += '<b>Xem trước:</b> '+res.valid+' ca hợp lệ'+(res.skipped?(' · '+res.skipped+' dòng lỗi'):'')+'.';
+    if(res.dateFrom) h += ' Từ '+fmtDate(res.dateFrom)+' đến '+fmtDate(res.dateTo)+'.';
+
+    // ─── Khối cảnh báo tên gần giống ───
+    if(employeesWithSug.length){
+      h += '<div class="import-warn">⚠️ <b>'+employeesWithSug.length
+         + ' nhân viên "mới" có thể trùng với nhân sự đã có</b> — chọn cách xử lý bên dưới:</div>';
+      employeesWithSug.forEach(function(e, idx){
+        h += '<div class="import-mapping">';
+        h += '<div class="import-mapping-head">"<b>'+esc(e.name)+'</b>" '
+           + '<span class="kdim">('+e.count+' ca · '+fmtHours(e.hours)+'h · '+fmtVND(e.gmv)+'đ)</span></div>';
+        h += '<div class="import-mapping-body">';
+        e.suggestions.forEach(function(sug){
+          var checked = (importNameMapping[e.name] === sug.name) ? ' checked' : '';
+          var badge, badgeCls;
+          if(sug.score >= 95){ badge = 'Chỉ khác dấu'; badgeCls = 'score-exact'; }
+          else if(sug.score >= 80){ badge = 'Rất giống'; badgeCls = 'score-high'; }
+          else if(sug.score >= 60){ badge = 'Có thể trùng'; badgeCls = 'score-med'; }
+          else { badge = 'Ít giống'; badgeCls = 'score-low'; }
+          h += '<label class="import-radio">'
+             + '<input type="radio" name="map_'+idx+'"'
+             + ' data-src="'+esc(e.name)+'"'
+             + ' value="'+esc(sug.name)+'"'+checked+'>'
+             + '<span>Dùng tên có sẵn: <b>'+esc(sug.name)+'</b></span>'
+             + ' <span class="score-badge '+badgeCls+'">'+badge+'</span>'
+             + '</label>';
+        });
+        var keepChecked = importNameMapping[e.name] ? '' : ' checked';
+        h += '<label class="import-radio">'
+           + '<input type="radio" name="map_'+idx+'"'
+           + ' data-src="'+esc(e.name)+'"'
+           + ' value=""'+keepChecked+'>'
+           + '<span>➕ Tạo nhân sự mới: <b>"'+esc(e.name)+'"</b></span>'
+           + '</label>';
+        h += '</div></div>';
+      });
+    }
+
+    // ─── Bảng tổng hợp NV (như cũ) ───
+    h += '<div class="table-scroll" style="margin-top:16px"><table><thead><tr><th>Nhân viên</th><th>Số ca</th><th>Giờ</th><th>GMV</th><th>Kênh</th></tr></thead><tbody>';
+    (res.employees || []).forEach(function(e){
+      var tag = '';
+      if(e.isNew){
+        // Nếu đã chọn map sang tên có sẵn -> hiện tag "sẽ đổi tên"
+        if(importNameMapping[e.name]) tag = ' <span class="day-tag" style="background:#fff3d6;color:#9a6a00">sẽ đổi tên</span>';
+        else tag = ' <span class="day-tag day-mini">mới</span>';
+      }
+      h += '<tr><td>'+esc(e.name)+tag+'</td>'
+        + '<td class="num">'+e.count+'</td><td class="num">'+fmtHours(e.hours)+'h</td>'
+        + '<td class="num gmv">'+fmtVND(e.gmv)+'</td><td>'+e.channels.map(esc).join(', ')+'</td></tr>';
+    });
+    h += '</tbody></table></div>';
+    if(res.newChannels && res.newChannels.length) h += '<p class="hint" style="margin-top:8px">Kênh mới sẽ được tự thêm: <b>'+res.newChannels.map(esc).join(', ')+'</b></p>';
+    if(res.errors && res.errors.length) h += '<p class="hint" style="margin-top:6px;color:var(--pink)">Lỗi bỏ qua: '+res.errors.map(esc).join('; ')+'</p>';
+    h += '<p class="hint" style="margin-top:8px">Kiểm tra tên nhân viên đúng dấu, kênh đúng tên — rồi bấm <b>Import dữ liệu</b> để lưu.</p></div>';
+
+    $('importPreview').innerHTML = h;
+    $('importPreview').style.display = '';
+
+    // Gắn event cho radio: khi user đổi lựa chọn, cập nhật importNameMapping
+    Array.prototype.forEach.call($('importPreview').querySelectorAll('.import-mapping input[type="radio"]'), function(r){
+      r.addEventListener('change', function(){
+        var src = r.getAttribute('data-src');
+        var target = r.value;
+        if(target) importNameMapping[src] = target;
+        else delete importNameMapping[src];
+        // Cập nhật tag "sẽ đổi tên" trong bảng tổng hợp mà không re-render tất cả
+        var rows = $('importPreview').querySelectorAll('table tbody tr');
+        Array.prototype.forEach.call(rows, function(tr){
+          var nameCell = tr.querySelector('td');
+          if(!nameCell) return;
+          var nameText = nameCell.textContent.replace(/mới|sẽ đổi tên/g, '').trim();
+          if(nameText === src){
+            // Xoá tag cũ
+            var tags = nameCell.querySelectorAll('.day-tag');
+            Array.prototype.forEach.call(tags, function(t){ t.remove(); });
+            // Thêm tag mới
+            if(importNameMapping[src]){
+              nameCell.insertAdjacentHTML('beforeend', ' <span class="day-tag" style="background:#fff3d6;color:#9a6a00">sẽ đổi tên</span>');
+            } else {
+              nameCell.insertAdjacentHTML('beforeend', ' <span class="day-tag day-mini">mới</span>');
+            }
+          }
+        });
+      });
+    });
+  }
+
+  function importShiftsUI(){
+    var text = ($('importBox').value || '').trim();
+    if(!text){ toast('Hãy dán dữ liệu vào ô trước.', true); return; }
+    var mode = importMode();
+    var lineCount = text.split(/\r?\n/).filter(function(l){ return l.trim(); }).length;
+
+    // Áp mapping tên nếu user đã chọn trong preview
+    var mappingCount = Object.keys(importNameMapping).length;
+    var finalText = mappingCount ? applyNameMapping(text, importNameMapping) : text;
+    var mappingNote = mappingCount
+      ? ('\n\n🔁 Sẽ đổi tên ' + mappingCount + ' nhân viên sang tên có sẵn theo lựa chọn của bạn:\n'
+         + Object.keys(importNameMapping).map(function(k){ return '   • "'+k+'" → "'+importNameMapping[k]+'"'; }).join('\n'))
+      : '';
+
+    confirmDialog('Import '+lineCount+' dòng dữ liệu lịch sử?\n\nCác ca sẽ được ghi vào lịch sử với ghi chú "Import". Tên nhân viên phải khớp đúng Nhân sự (đúng dấu).' + mappingNote, function(){
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Import thất bại.', true); $('importResult').textContent = (res && res.error) || ''; return; }
+        var msg = '✓ Đã nhập '+res.imported+' ca.';
+        if(res.skipped) msg += ' Bỏ qua '+res.skipped+' dòng lỗi.';
+        if(mappingCount) msg += ' 🔁 Đã đổi tên cho '+mappingCount+' nhân viên.';
+        $('importResult').textContent = msg + (res.errors && res.errors.length ? (' ('+res.errors.join('; ')+')') : '');
+        $('importBox').value = '';
+        $('importPreview').style.display = 'none';
+        importNameMapping = {}; // reset mapping sau khi import thành công
+        toast('Đã import '+res.imported+' ca.');
+        loadShifts();
+      })
+      .withFailureHandler(function(e){ overlay(false); onFailure(e); })
+      .importShifts(AUTH.token, finalText, mode);
+    }, {title:'Import lịch sử', okText:'Import'});
+  }
+
+  /* ===================== CHECK-IN / CHECK-OUT + ẢNH ===================== */
+  var ciPhoto = null, coPhoto = null;
+
+  // Nén ảnh trên máy trước khi gửi (giảm dung lượng Drive).
+  function compressPhoto(file, cb){
+    if(!file){ cb(null); return; }
+    var reader = new FileReader();
+    reader.onload = function(){
+      var img = new Image();
+      img.onload = function(){
+        var max = 900, w = img.width, h = img.height;
+        if(w > h && w > max){ h = Math.round(h*max/w); w = max; }
+        else if(h >= w && h > max){ w = Math.round(w*max/h); h = max; }
+        var c = document.createElement('canvas'); c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        cb(c.toDataURL('image/jpeg', 0.7));
+      };
+      img.onerror = function(){ cb(null); };
+      img.src = reader.result;
+    };
+    reader.onerror = function(){ cb(null); };
+    reader.readAsDataURL(file);
+  }
+
+  function normName(s){
+    return String(s||'').trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'') // bỏ dấu thanh
+      .replace(/đ/g,'d').replace(/\s+/g,' ');
+  }
+
+  /* ==================== FUZZY MATCH TÊN NHÂN SỰ (dùng cho preview import) ==================== */
+  // Trả điểm 0-100 cho độ giống nhau giữa 2 tên (đã bỏ dấu, thường hoá).
+  //  100 = trùng hoàn toàn (chỉ khác dấu/hoa thường)
+  //   85 = 1 tên là 1 phần của tên còn lại (VD "Quỳnh Trang" ⊂ "Vũ Ngọc Quỳnh Trang")
+  //   55 = chứa nhưng khác biệt kích thước rất lớn (VD "An" ⊂ "Nguyễn Văn An" — dễ nhầm)
+  //  <65 = chung 1 số từ (token) — có thể trùng
+  //    0 = không liên quan
+  function nameSimilarity(a, b){
+    var na = normName(a), nb = normName(b);
+    if(!na || !nb || na === nb && a === b) return 0; // 100% khớp cả dấu = đã match trước, bỏ qua
+    if(na === nb) return 100; // chỉ khác dấu/hoa thường
+    if(nb.indexOf(na) >= 0 || na.indexOf(nb) >= 0){
+      var shorter = Math.min(na.length, nb.length);
+      var longer = Math.max(na.length, nb.length);
+      return (shorter / longer < 0.3) ? 55 : 85;
+    }
+    var tokensA = na.split(' ').filter(function(t){ return t.length > 1; });
+    var tokensB = nb.split(' ').filter(function(t){ return t.length > 1; });
+    if(!tokensA.length || !tokensB.length) return 0;
+    var common = tokensA.filter(function(t){ return tokensB.indexOf(t) >= 0; });
+    if(!common.length) return 0;
+    var maxLen = Math.max(tokensA.length, tokensB.length);
+    return Math.round((common.length / maxLen) * 65);
+  }
+
+  // Tìm nhân sự có sẵn giống với "newName". Trả top 3 gợi ý (đã sort theo điểm giảm dần).
+  function findSimilarStaff(newName, existingList){
+    var results = [];
+    (existingList || []).forEach(function(existing){
+      var score = nameSimilarity(newName, existing);
+      if(score >= 50) results.push({ name: existing, score: score });
+    });
+    results.sort(function(a, b){ return b.score - a.score; });
+    return results.slice(0, 3);
+  }
+
+  // Áp mapping tên vào text đã dán: đổi tên cột 2 (Tên nhân viên) sang tên mới trước khi gửi backend.
+  function applyNameMapping(text, mapping){
+    if(!mapping || !Object.keys(mapping).length) return text;
+    var lines = text.split(/\r?\n/);
+    var out = lines.map(function(line){
+      var trimmed = line.trim();
+      if(!trimmed) return line;
+      var isTab = trimmed.indexOf('\t') >= 0;
+      var cols = isTab ? trimmed.split('\t') : trimmed.split(',');
+      if(cols.length < 2) return line;
+      var origName = String(cols[1]).trim();
+      if(mapping[origName]){
+        cols[1] = mapping[origName];
+        return cols.join(isTab ? '\t' : ',');
+      }
+      return line;
+    });
+    return out.join('\n');
+  }
+
+  // State cho mapping đang chọn trong preview: { "Tên_trong_file": "Tên_có_sẵn_trong_hệ_thống" }
+  var importNameMapping = {};
+  function myOpenShift(){
+    // QUAN TRỌNG: với Lead Live, state.records có cả ca người khác trong kênh quản lý.
+    // Chỉ nhận ca đang mở ĐÚNG TÊN mình (khớp bỏ dấu), KHÔNG vớ ca người khác.
+    var nm = normName(AUTH.staff);
+    if(!nm) return null;
+    for(var i=0;i<state.records.length;i++){
+      var r = state.records[i];
+      if(r.open && normName(r.name) === nm) return r;
+    }
+    return null;
+  }
+
+  function renderCheckCard(){
+    // Nhân viên có thể check-in vào bất kỳ kênh nào; kênh sẽ tự được ghi vào tài khoản.
+    // Nhân viên & Lead Live có thể check-in vào bất kỳ kênh nào (làm việc ở kênh khác kênh quản lý)
+    if($('ci_channel')){
+      var allowed = state.channels;
+      var opts = '<option value="">— Chọn kênh —</option>' +
+        allowed.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join('');
+      var cur = $('ci_channel').value;
+      $('ci_channel').innerHTML = opts;
+      if(allowed.indexOf(cur) >= 0) $('ci_channel').value = cur;
+    }
+    var open = myOpenShift();
+    if(open){
+      $('checkInForm').style.display = 'none';
+      $('checkOutForm').style.display = '';
+      $('checkTitle').textContent = 'Đang trong ca';
+      $('checkHint').textContent = 'Bạn đã check-in. Khi kết thúc, nhập GMV cuối ca và chụp ảnh để check-out.';
+      $('ci_openInfo').innerHTML = 'Bắt đầu lúc <b>'+esc(open.start)+'</b> · Kênh <b>'+esc(open.channel)+'</b> · Vị trí <b>'+esc(open.position)+'</b><br>GMV đầu ca: <b>'+fmtVND(open.gmvStart)+'đ</b>';
+      $('checkOutForm').setAttribute('data-id', open.id);
+    } else {
+      $('checkInForm').style.display = '';
+      $('checkOutForm').style.display = 'none';
+      $('checkTitle').textContent = 'Bắt đầu ca live';
+      $('checkHint').textContent = 'Chọn kênh, vị trí, nhập GMV đầu ca và chụp ảnh để check-in.';
+    }
+  }
+
+  function setCheckLoading(btnId, on){ var b=$(btnId); if(b){ b.classList.toggle('loading', !!on); b.disabled = !!on; } }
+
+  /* ----- Popup kênh đang làm (nhân viên tự chọn) ----- */
+  var _channelSetupShown = false;
+  function openChannelSetup(){
+    var checked = {};
+    (AUTH.channels||[]).forEach(function(c){ checked[c] = true; });
+    $('cm_list').innerHTML = state.channels.length ? state.channels.map(function(c){
+      return '<label class="chk"><input type="checkbox" value="'+esc(c)+'"'+(checked[c]?' checked':'')+'> '+esc(c)+'</label>';
+    }).join('') : '<div style="color:var(--text-faint)">Chưa có kênh nào trong hệ thống.</div>';
+    $('channelModal').style.display = 'flex';
+  }
+  function closeChannelSetup(){ $('channelModal').style.display = 'none'; }
+  function saveMyChannels(){
+    var chans = [];
+    Array.prototype.forEach.call($('cm_list').querySelectorAll('input:checked'), function(i){ chans.push(i.value); });
+    overlay(true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        overlay(false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error)||'Lưu kênh thất bại.', true); return; }
+        AUTH.channels = res.channels || chans;
+        closeChannelSetup();
+        renderCheckCard();
+        toast('Đã lưu kênh đang làm.');
+      })
+      .withFailureHandler(function(e){ overlay(false); onFailure(e); })
+      .setMyChannels(AUTH.token, chans);
+  }
+  function maybeShowChannelSetup(){
+    if(_channelSetupShown) return;
+    if(AUTH.role === 'staff' && AUTH.firstLogin && state.channels.length){
+      _channelSetupShown = true;
+      setTimeout(openChannelSetup, 400);
+    }
+  }
+
+  function doCheckIn(){
+    if(!ciPhoto){ toast('Vui lòng chụp ảnh đầu ca.', true); return; }
+    var rec = { channel:$('ci_channel').value, position:$('ci_position').value, gmvStart: parseVND($('ci_gmv').value) };
+    if(!rec.channel){ toast('Vui lòng chọn kênh.', true); return; }
+    setCheckLoading('checkInBtn', true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        setCheckLoading('checkInBtn', false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Check-in thất bại.', true); return; }
+        if(res.channels) AUTH.channels = res.channels; // tự ghi nhận kênh vào tài khoản
+        toast('Đã check-in. Chúc ca live bùng nổ!');
+        ciPhoto = null; $('ci_gmv').value=''; $('ci_preview').style.display='none'; $('ci_photo').value='';
+        loadShifts();
+      })
+      .withFailureHandler(onFailure)
+      .checkIn(AUTH.token, rec, ciPhoto);
+  }
+
+  function doCheckOut(){
+    if(!coPhoto){ toast('Vui lòng chụp ảnh cuối ca.', true); return; }
+    var id = $('checkOutForm').getAttribute('data-id');
+    var gmvEnd = parseVND($('co_gmv').value);
+    setCheckLoading('checkOutBtn', true);
+    google.script.run
+      .withSuccessHandler(function(res){
+        setCheckLoading('checkOutBtn', false);
+        if(authGate(res)) return;
+        if(!res || !res.success){ toast((res && res.error) || 'Check-out thất bại.', true); return; }
+        toast('Đã check-out. Cảm ơn bạn!');
+        coPhoto = null; $('co_gmv').value=''; $('co_preview').style.display='none'; $('co_photo').value='';
+        loadShifts();
+      })
+      .withFailureHandler(onFailure)
+      .checkOut(AUTH.token, id, gmvEnd, coPhoto);
+  }
+
+  // Xem ảnh chấm công của 1 ca
+  function viewPhotos(shiftId, hasStart, hasEnd){
+    $('photoModal').style.display = 'flex';
+    $('photoModalBody').innerHTML = '<div class="muted">Đang tải ảnh…</div>';
+    var html = '';
+    var pending = (hasStart?1:0) + (hasEnd?1:0);
+    if(!pending){ $('photoModalBody').innerHTML = '<div class="muted">Ca này chưa có ảnh.</div>'; return; }
+    var parts = { start:null, end:null };
+    function done(){
+      pending--;
+      if(pending > 0) return;
+      var out = '';
+      if(parts.start) out += '<div class="photo-block"><div class="photo-cap">Ảnh đầu ca</div>'+parts.start+'</div>';
+      if(parts.end)   out += '<div class="photo-block"><div class="photo-cap">Ảnh cuối ca</div>'+parts.end+'</div>';
+      $('photoModalBody').innerHTML = out || '<div class="muted">Không tải được ảnh.</div>';
+    }
+    function fetchOne(which){
+      google.script.run
+        .withSuccessHandler(function(res){
+          if(res && res.success){ parts[which] = '<img src="'+res.data+'" class="photo-full">'; }
+          else { parts[which] = '<div class="muted">'+((res && res.error) || 'Không tải được ảnh')+'</div>'; }
+          done();
+        })
+        .withFailureHandler(function(){ parts[which] = '<div class="muted">Lỗi tải ảnh.</div>'; done(); })
+        .getShiftPhoto(AUTH.token, shiftId, which);
+    }
+    if(hasStart) fetchOne('start');
+    if(hasEnd) fetchOne('end');
+  }
+
+  function tickClock(){
+    var now = new Date();
+    $('liveClock').textContent = now.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'});
+    $('liveDate').textContent = now.toLocaleDateString('vi-VN', {weekday:'long', day:'numeric', month:'numeric', year:'numeric'});
+  }
+
+  /* ----------------- Khởi tạo ----------------- */
+  window.addEventListener('DOMContentLoaded', function(){
+    $('f_date').value = new Date().toISOString().slice(0,10);
+    tickClock(); setInterval(tickClock, 1000);
+
+    $('f_start').addEventListener('input', updateDuration);
+    $('f_end').addEventListener('input', updateDuration);
+    $('f_nameSelect').addEventListener('change', function(){
+      var isNew = this.value === '__new__';
+      $('f_nameNew').style.display = isNew ? 'block' : 'none';
+      if(isNew){ $('f_nameNew').value=''; $('f_nameNew').focus(); }
+    });
+    $('saveBtn').addEventListener('click', submitForm);
+    $('cancelBtn').addEventListener('click', resetForm);
+    $('exportBtn').addEventListener('click', exportXLSX);
+    $('addStaffBtn').addEventListener('click', addStaffUI);
+    $('s_name').addEventListener('keydown', function(e){ if(e.key === 'Enter') addStaffUI(); });
+    if($('s_code')) $('s_code').addEventListener('keydown', function(e){ if(e.key === 'Enter') addStaffUI(); });
+    if($('staffSearch')) $('staffSearch').addEventListener('input', renderStaffList);
+    $('addChannelBtn').addEventListener('click', addChannelUI);
+    $('c_name').addEventListener('keydown', function(e){ if(e.key === 'Enter') addChannelUI(); });
+    if($('importBtn')) $('importBtn').addEventListener('click', importShiftsUI);
+    if($('importPreviewBtn')) $('importPreviewBtn').addEventListener('click', previewImportUI);
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="importMode"]'), function(r){
+      r.addEventListener('change', function(){ onImportModeChange(); if($('importPreview')) $('importPreview').style.display='none'; });
+    });
+    if($('importHint')) onImportModeChange();
+    function onHistFilterChange_(){ state.histDays = 14; renderAll(); }
+    $('filterChannel').addEventListener('change', onHistFilterChange_);
+    $('filterName').addEventListener('input', onHistFilterChange_);
+    $('f_gmvStart').addEventListener('input', updateGmv);
+    $('f_gmvEnd').addEventListener('input', updateGmv);
+    $('f_gmvStart').addEventListener('blur', function(e){ if(e.target.value) e.target.value = fmtVND(parseVND(e.target.value)); });
+    $('f_gmvEnd').addEventListener('blur', function(e){ if(e.target.value) e.target.value = fmtVND(parseVND(e.target.value)); });
+
+    // Bấm vào ô ngày/giờ là mở ngay bộ chọn (không cần bấm icon)
+    ['f_date','f_start','f_end','filterFrom','filterTo','ovFrom','ovTo','payFrom','payTo'].forEach(function(id){
+      var el = $(id); if(!el) return;
+      function open(){ try { el.showPicker(); } catch(e){} }
+      el.addEventListener('focus', open);
+      el.addEventListener('click', open);
+    });
+
+    // Bộ lọc kỳ: hiện ô từ/đến khi chọn "Khoảng tuỳ chọn"
+    function bindPeriod(selId, fromId, toId, onChange){
+      function toggle(){
+        var c = $(selId).value === 'custom';
+        $(fromId).style.display = c ? '' : 'none';
+        $(toId).style.display = c ? '' : 'none';
+      }
+      $(selId).addEventListener('change', function(){ toggle(); onChange(); });
+      $(fromId).addEventListener('change', onChange);
+      $(toId).addEventListener('change', onChange);
+      toggle();
+    }
+    bindPeriod('filterPeriod','filterFrom','filterTo', onHistFilterChange_);
+    bindPeriod('ovPeriod','ovFrom','ovTo', renderOverview);
+    if($('ovChannel')) $('ovChannel').addEventListener('change', renderOverview);
+    if($('ovDayTypeFilter')) $('ovDayTypeFilter').addEventListener('change', renderOverview);
+
+    // Chuyển tab (theo quyền)
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(btn){
+      btn.addEventListener('click', function(){ showTab(btn.getAttribute('data-tab')); });
+    });
+
+    // Cập nhật "đã live bao lâu" mỗi 60 giây (chỉ khi có ca đang live)
+    setInterval(function(){
+      if(state.records && state.records.some(function(r){ return r.open; })) renderLiveNow();
+    }, 60000);
+
+    // Sự kiện đăng nhập / tài khoản
+    $('lg_btn').addEventListener('click', doLogin);
+    $('lg_pass').addEventListener('keydown', function(e){ if(e.key === 'Enter') doLogin(); });
+    if($('lg_passToggle')) $('lg_passToggle').addEventListener('click', function(){
+      var inp = $('lg_pass'), show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      this.textContent = show ? '🙈' : '👁';
+      this.setAttribute('aria-label', show ? 'Ẩn mật khẩu' : 'Xem mật khẩu');
+      inp.focus();
+    });
+    $('logoutBtn').addEventListener('click', function(){ doLogout(false); });
+    $('changePwBtn').addEventListener('click', changeMyPasswordUI);
+    if($('nu_role')) $('nu_role').addEventListener('change', onRoleChange);
+    if($('nu_createBtn')) $('nu_createBtn').addEventListener('click', submitUserForm);
+    if($('nu_cancelBtn')) $('nu_cancelBtn').addEventListener('click', cancelEditUser);
+    if($('toggleCreateUser')) $('toggleCreateUser').addEventListener('click', openCreateUserForm);
+    if($('userSearch')) $('userSearch').addEventListener('input', renderUsers);
+
+    // Check-in / check-out + chụp ảnh
+    if($('ci_photoBtn')){
+      $('ci_photoBtn').addEventListener('click', function(){ $('ci_photo').click(); });
+      $('ci_photo').addEventListener('change', function(e){
+        compressPhoto(e.target.files[0], function(d){
+          ciPhoto = d;
+          if(d){ $('ci_preview').src = d; $('ci_preview').style.display = ''; $('ci_photoBtn').textContent = '📷 Chụp lại'; }
+        });
+      });
+      $('co_photoBtn').addEventListener('click', function(){ $('co_photo').click(); });
+      $('co_photo').addEventListener('change', function(e){
+        compressPhoto(e.target.files[0], function(d){
+          coPhoto = d;
+          if(d){ $('co_preview').src = d; $('co_preview').style.display = ''; $('co_photoBtn').textContent = '📷 Chụp lại'; }
+        });
+      });
+      $('checkInBtn').addEventListener('click', doCheckIn);
+      $('checkOutBtn').addEventListener('click', doCheckOut);
+      $('ci_gmv').addEventListener('blur', function(e){ if(e.target.value) e.target.value = fmtVND(parseVND(e.target.value)); });
+      $('co_gmv').addEventListener('blur', function(e){ if(e.target.value) e.target.value = fmtVND(parseVND(e.target.value)); });
+    }
+    if($('photoModalClose')) $('photoModalClose').addEventListener('click', function(){ $('photoModal').style.display = 'none'; });
+    if($('confirmOk')) $('confirmOk').addEventListener('click', function(){ var cb=_confirmCb; closeConfirm(); if(cb) cb(); });
+    if($('confirmCancel')) $('confirmCancel').addEventListener('click', closeConfirm);
+    if($('cm_save')) $('cm_save').addEventListener('click', saveMyChannels);
+    if($('cm_cancel')) $('cm_cancel').addEventListener('click', closeChannelSetup);
+    if($('channelModal')) $('channelModal').addEventListener('click', function(e){ if(e.target === $('channelModal')) closeChannelSetup(); });
+    if($('confirmModal')) $('confirmModal').addEventListener('click', function(e){ if(e.target === $('confirmModal')) closeConfirm(); });
+    if($('photoModal')) $('photoModal').addEventListener('click', function(e){ if(e.target === $('photoModal')) $('photoModal').style.display = 'none'; });
+    if($('rq_submit')) $('rq_submit').addEventListener('click', submitReqForm);
+    if($('rq_gmvStart')) $('rq_gmvStart').addEventListener('blur', function(e){ if(e.target.value) e.target.value = fmtVND(parseVND(e.target.value)); });
+    if($('rq_gmvEnd')) $('rq_gmvEnd').addEventListener('blur', function(e){ if(e.target.value) e.target.value = fmtVND(parseVND(e.target.value)); });
+    if($('rq_cancel')) $('rq_cancel').addEventListener('click', closeReqForm);
+    if($('rq_cancel2')) $('rq_cancel2').addEventListener('click', closeReqForm);
+    if($('reqModal')) $('reqModal').addEventListener('click', function(e){ if(e.target === $('reqModal')) closeReqForm(); });
+    if($('rj_confirm')) $('rj_confirm').addEventListener('click', submitReject);
+    if($('rj_cancel')) $('rj_cancel').addEventListener('click', closeRejectModal);
+    if($('rejectModal')) $('rejectModal').addEventListener('click', function(e){ if(e.target === $('rejectModal')) closeRejectModal(); });
+
+    // Bảng lương V2
+    document.addEventListener('input', function(e){
+      var t = e.target;
+      if(t && t.classList && t.classList.contains('numfmt')){
+        var d = t.value.replace(/\D/g,'');
+        t.value = d ? d.replace(/\B(?=(\d{3})+(?!\d))/g,'.') : '';
+      }
+    });
+    document.addEventListener('input', function(e){ if(e.target && e.target.closest && e.target.closest('#payResult')) state.payDirty = true; });
+    if($('payCalcBtn')) $('payCalcBtn').addEventListener('click', updateAndCalc);
+    if($('payExportBtn')) $('payExportBtn').addEventListener('click', exportPayrollXlsxUI);
+    if($('payLockBtn')) $('payLockBtn').addEventListener('click', lockPayrollMonthUI);
+    if($('payChannelFilterBtn')) $('payChannelFilterBtn').addEventListener('click', function(e){
+      e.stopPropagation();
+      var menu = $('payChannelFilterMenu'); if(!menu) return;
+      menu.style.display = (menu.style.display === 'none' || !menu.style.display) ? '' : 'none';
+    });
+    document.addEventListener('click', function(e){
+      var wrap = $('payChannelFilter');
+      if(wrap && !wrap.contains(e.target) && $('payChannelFilterMenu')){
+        $('payChannelFilterMenu').style.display = 'none';
+      }
+    });
+    if($('payUnlockBtn')) $('payUnlockBtn').addEventListener('click', unlockPayrollMonthUI);
+    if($('payMonth')) $('payMonth').addEventListener('change', calcPayroll);
+    if($('fixedMonth')) $('fixedMonth').addEventListener('change', renderFixedSalaryMonth);
+    if($('fixedSaveBtn')) $('fixedSaveBtn').addEventListener('click', saveFixedSalaryMonthUI);
+    if($('fs_addBtn')) $('fs_addBtn').addEventListener('click', addFixedStaffUI);
+    if($('fs_name')) $('fs_name').addEventListener('keydown', function(e){ if(e.key==='Enter') addFixedStaffUI(); });
+    if($('fs_search')) $('fs_search').addEventListener('input', renderFixedStaffListFiltered);
+    Array.prototype.forEach.call(document.querySelectorAll('.pay-subtab'), function(b){
+      b.addEventListener('click', function(){ setPayView(b.getAttribute('data-payview')); });
+    });
+
+    // Bootstrap: thử khôi phục phiên từ token đã lưu
+    var saved = null;
+    try { saved = localStorage.getItem('eaz_token'); } catch(e){}
+    if(saved){
+      AUTH.token = saved;
+      google.script.run
+        .withSuccessHandler(function(res){
+          if(res && res.success){ applyAuth({ role:res.role, channel:res.channel, staff:res.staff, username:res.username }); startApp(); }
+          else { doLogout(false); }
+        })
+        .withFailureHandler(function(){ showLogin(''); })
+        .whoami(saved);
+    } else {
+      showLogin('');
+    }
+  });

@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <title>EAZ Chấm công - Livestream</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8">
+  <!-- SheetJS (XLSX) — dùng để xuất file Excel .xlsx từ nút "Xuất Excel" -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    /* ==== CẢNH BÁO CA TRÙNG ==== */
+    .hist-item.is-dup { border:1.5px solid #f43f5e; background:linear-gradient(90deg, #fff1f4 0%, #ffffff 60%); }
+
+    /* CỰC KỲ QUAN TRỌNG: override CSS gốc để nút Sửa/Xoá luôn click được */
+    .hist-item .hi-top { align-items:center !important; flex-wrap:wrap !important; gap:6px !important; }
+    .hist-item .hi-acts {
+      flex-shrink:0 !important;
+      position:relative !important;
+      z-index:10 !important;
+      margin-left:auto !important;
+      display:inline-flex !important;
+      gap:4px !important;
+      pointer-events:auto !important;
+    }
+    .hist-item .hi-acts .act,
+    .hist-item .hi-acts button {
+      position:relative !important;
+      z-index:11 !important;
+      pointer-events:auto !important;
+      cursor:pointer !important;
+      display:inline-flex !important;
+      align-items:center !important;
+      justify-content:center !important;
+      min-width:28px !important;
+      min-height:28px !important;
+    }
+
+    .dup-badge {
+      display:inline-flex; align-items:center; gap:4px;
+      background:#f43f5e; color:#fff; font-weight:700; font-size:10.5px;
+      padding:2px 8px; border-radius:6px; letter-spacing:.3px;
+      white-space:nowrap;
+      /* Badge không nhận click — cho phép click xuyên qua */
+      pointer-events:none !important;
+      animation: dupPulse 1.6s ease-in-out infinite;
+    }
+    @keyframes dupPulse {
+      0%,100% { transform:scale(1); opacity:1; }
+      50%     { transform:scale(1.04); opacity:.9; }
+    }
+    .dup-card { border:1.5px solid #f43f5e; background:#fff8f9; }
+    .dup-card h2 { color:#b91c1c; }
+    .dup-count { font-size:12px; font-weight:600; color:#b91c1c; background:#fee2e2; padding:3px 10px; border-radius:10px; margin-left:8px; }
+
+    /* Toolbar chọn/xoá hàng loạt */
+    .dup-toolbar {
+      display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+      padding:12px 14px; background:#fef2f2; border:1px solid #fecdd3; border-radius:10px;
+      margin-bottom:14px;
+    }
+    .dup-selectall { display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600; color:#7f1d1d; }
+    .dup-selectall input { width:16px; height:16px; cursor:pointer; accent-color:#f43f5e; }
+    .dup-selcount { color:#7f1d1d; font-size:13px; font-weight:600; }
+    .dup-del-btn {
+      margin-left:auto; padding:10px 18px; border-radius:8px; border:0;
+      background:#dc2626; color:#fff; font-weight:600; cursor:pointer;
+      transition:background .15s, transform .05s;
+    }
+    .dup-del-btn:hover:not(:disabled) { background:#b91c1c; }
+    .dup-del-btn:active:not(:disabled) { transform:scale(.97); }
+    .dup-del-btn:disabled { background:#e5e7eb; color:#9ca3af; cursor:not-allowed; }
+
+    .dup-list { display:flex; flex-direction:column; gap:14px; }
+    .dup-group { border-radius:10px; padding:12px 14px; }
+    .dup-group-head { font-size:14px; margin-bottom:10px; color:#7f1d1d; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .dup-group-badge {
+      font-size:11px; font-weight:700; color:#7f1d1d;
+      padding:3px 9px; border-radius:6px;
+    }
+    .dup-tag { background:#fee2e2; color:#b91c1c; font-size:11px; font-weight:600; padding:2px 8px; border-radius:6px; margin-left:auto; }
+    .dup-item {
+      display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+      padding:8px 10px; background:#fff; border-radius:8px; margin-top:6px;
+      font-size:13px; border:1px solid rgba(0,0,0,0.04);
+    }
+    .dup-cb { display:flex; align-items:center; cursor:pointer; }
+    .dup-cb input { width:18px; height:18px; cursor:pointer; accent-color:#dc2626; }
+    .dup-item .dup-time { font-weight:600; color:#374151; }
+    .dup-item .dup-gmv { font-weight:700; color:#059669; }
+    .dup-photo-btn,
+    .dup-edit-btn,
+    .dup-del-single-btn {
+      background:#fff; border:1px solid #e5e7eb; border-radius:6px;
+      padding:4px 10px; cursor:pointer; font-size:14px;
+      transition:all .12s;
+      display:inline-flex; align-items:center; justify-content:center;
+      min-width:32px; min-height:30px;
+    }
+    .dup-photo-btn:hover { background:#f3f4f6; border-color:#dc2626; transform:scale(1.05); }
+    .dup-edit-btn { color:#2563eb; font-weight:600; }
+    .dup-edit-btn:hover { background:#eff6ff; border-color:#2563eb; transform:scale(1.05); }
+    .dup-del-single-btn { color:#dc2626; font-weight:600; }
+    .dup-del-single-btn:hover { background:#fef2f2; border-color:#dc2626; transform:scale(1.05); }
+    .dup-photo-placeholder { color:#d1d5db; font-size:12px; padding:4px 8px; }
+    .dup-acts-group {
+      display:inline-flex; align-items:center; gap:4px; margin-left:auto;
+    }
+    .kdim { color:#9ca3af; font-weight:400; font-size:11.5px; }
+
+    /* ==== ĐƠN GIÁ GIỜ THEO KÊNH ==== */
+    .cfg-emp-block {
+      background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px;
+      padding:14px 16px; margin-bottom:14px;
+    }
+    .cfg-emp-name {
+      font-weight:700; color:#111827; font-size:15px;
+      margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid #e5e7eb;
+    }
+    .cfg-hourly-row {
+      align-items:center;
+    }
+    .cfg-chan-label {
+      display:inline-flex; align-items:center; gap:6px;
+      font-weight:500; color:#374151;
+    }
+    .cfg-chan-default {
+      background:#eff6ff; color:#1d4ed8; font-weight:600;
+      padding:3px 9px; border-radius:6px; font-size:12px;
+    }
+    .cfg-custom-tag {
+      background:#dcfce7; color:#166534; font-weight:600;
+      padding:2px 7px; border-radius:5px; font-size:11px;
+    }
+    .cfg-has-custom {
+      background:#f0fdf4;
+    }
+    .cfg-add-chan-row {
+      background:#fefce8; border:1px dashed #eab308;
+    }
+    .cfg-add-chan-select {
+      border:0; background:transparent; color:#a16207; font-weight:600; cursor:pointer;
+      padding:6px 8px; font-size:13px; width:100%;
+    }
+    .cfg-add-chan-select:hover { background:#fef9c3; border-radius:6px; }
+    .cfg-empty-hint {
+      background:#fef3c7; color:#92400e; padding:10px 14px;
+      border-radius:8px; margin-top:8px; font-size:12.5px;
+    }
+
+    /* ==== THƯỞNG HỖ TRỢ trong Bảng lương ==== */
+    .pay-emp-hotro {
+      display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+      padding:10px 16px 12px; font-size:13px; color:#374151;
+      border-top:1px dashed #e5e7eb;
+    }
+    .pay-hotro {
+      width:120px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:6px;
+      font-size:13px; text-align:right; font-weight:600; color:#059669;
+    }
+    .pay-hotro:focus { border-color:#f59e0b; outline:none; }
+    .pay-hotro-note {
+      flex:1; min-width:180px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:6px;
+      font-size:13px;
+    }
+    .pay-hotro-note:focus { border-color:#f59e0b; outline:none; }
+    .pay-hotro-note-view { color:#6b7280; font-style:italic; }
+    .sub-hotro { color:#059669; font-weight:600; }
+
+    /* ==== CHỐT LƯƠNG THÁNG ==== */
+    .btn-lock {
+      background:#dc2626; color:#fff; border:0; border-radius:8px;
+      font-weight:600; cursor:pointer; transition:all .15s;
+    }
+    .btn-lock:hover { background:#b91c1c; }
+    .btn-unlock {
+      background:#fbbf24; color:#78350f; border:0; border-radius:8px;
+      font-weight:600; cursor:pointer; transition:all .15s;
+    }
+    .btn-unlock:hover { background:#f59e0b; }
+    #payLockBadge {
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+      padding:10px 14px; background:#fef2f2; border:1.5px solid #fecdd3;
+      border-radius:10px; margin:10px 0 0;
+      font-size:13px; color:#7f1d1d;
+    }
+    #payLockBadge .lock-icon { font-size:18px; }
+    #payLockBadge b { color:#991b1b; }
+    #payLockBadge.mo-chot {
+      background:#fefce8; border-color:#fde68a; color:#78350f;
+    }
+    #payLockBadge.mo-chot b { color:#92400e; }
+    .locked-input {
+      background:#f3f4f6 !important; color:#6b7280 !important;
+      cursor:not-allowed !important; pointer-events:none;
+    }
+
+    /* ==== FILTER KÊNH (MULTI-SELECT) ==== */
+    .chan-filter { position:relative; }
+    .chan-filter-btn {
+      padding:9px 14px; border:1px solid #d1d5db; border-radius:8px;
+      background:#fff; cursor:pointer; font-size:13px; font-weight:500;
+      min-width:180px; text-align:left;
+    }
+    .chan-filter-btn .k-caret { float:right; color:#6b7280; }
+    .chan-filter-btn:hover { border-color:#9ca3af; }
+    .chan-filter-menu {
+      position:absolute; top:100%; left:0; z-index:100; margin-top:4px;
+      min-width:220px; max-height:280px; overflow-y:auto;
+      background:#fff; border:1px solid #d1d5db; border-radius:8px;
+      box-shadow:0 4px 12px rgba(0,0,0,0.1); padding:8px;
+    }
+    .chan-filter-menu label {
+      display:flex; align-items:center; gap:8px; padding:6px 8px;
+      cursor:pointer; border-radius:6px; font-size:13px;
+    }
+    .chan-filter-menu label:hover { background:#f3f4f6; }
+    .chan-filter-menu input { cursor:pointer; }
+    .chan-filter-menu .cf-actions {
+      display:flex; gap:6px; padding:6px 0; border-bottom:1px solid #e5e7eb; margin-bottom:6px;
+    }
+    .chan-filter-menu .cf-actions button {
+      background:none; border:0; color:#2563eb; cursor:pointer; font-size:12px; padding:4px 6px;
+    }
+    .chan-filter-menu .cf-actions button:hover { text-decoration:underline; }
+
+    /* ==== LƯƠNG CỨNG THEO THÁNG ==== */
+    .fixed-emp-card {
+      background:#fff; border:1px solid #e5e7eb; border-radius:12px;
+      padding:16px; margin-bottom:14px;
+    }
+    .fixed-emp-head {
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      padding-bottom:10px; border-bottom:1px solid #e5e7eb; margin-bottom:10px;
+    }
+    .fixed-emp-name { font-weight:700; font-size:15px; color:#111827; }
+    .fixed-emp-role { color:#6b7280; font-size:12px; margin-left:8px; }
+    .fixed-emp-total { color:#059669; font-weight:700; font-size:15px; }
+    .fixed-chan-row {
+      display:flex; align-items:center; gap:10px; padding:8px 6px; flex-wrap:wrap;
+    }
+    .fixed-chan-name { flex:1; min-width:130px; font-size:13px; color:#374151; }
+    .fixed-chan-name .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+    .fixed-chan-amount {
+      width:130px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:6px;
+      font-size:13px; text-align:right; font-weight:600; color:#059669;
+    }
+    .fixed-chan-amount:focus { border-color:#f59e0b; outline:none; }
+    .fixed-chan-note {
+      flex:1; min-width:180px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:6px; font-size:13px;
+    }
+    .fixed-add-chan-select {
+      padding:6px 10px; border:1px dashed #d1d5db; border-radius:6px; background:#fefce8;
+      color:#a16207; font-weight:600; cursor:pointer; font-size:12px;
+    }
+    .fixed-remove-btn {
+      background:#fef2f2; border:1px solid #fca5a5; color:#dc2626; padding:4px 8px;
+      border-radius:5px; cursor:pointer; font-size:12px;
+    }
+    .fixed-remove-btn:hover { background:#fee2e2; }
+
+    /* ==== THƯỞNG HỖ TRỢ NHIỀU DÒNG ==== */
+    .hotro-item {
+      display:flex; align-items:center; gap:8px; padding:6px 0; flex-wrap:wrap;
+    }
+    .hotro-item .hotro-chan-select {
+      min-width:130px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:6px; font-size:13px;
+    }
+    .hotro-add-btn {
+      background:#ecfeff; border:1px dashed #22d3ee; color:#0891b2;
+      padding:5px 10px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:600;
+    }
+    .hotro-add-btn:hover { background:#cffafe; }
+    .hotro-remove-btn {
+      background:none; border:0; color:#dc2626; cursor:pointer; font-size:16px;
+      padding:2px 6px; border-radius:4px;
+    }
+    .hotro-remove-btn:hover { background:#fee2e2; }
+
+    /* ==== DUYỆT HÀNG LOẠT YÊU CẦU ==== */
+    .req-bulk-toolbar {
+      display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+      padding:12px 16px; background:#eff6ff; border:1px solid #bfdbfe;
+      border-radius:10px; margin:0 0 14px;
+    }
+    .req-bulk-selectall {
+      display:flex; align-items:center; gap:8px; cursor:pointer;
+      font-weight:600; color:#1e3a8a; font-size:13.5px;
+    }
+    .req-bulk-selectall input {
+      width:18px; height:18px; cursor:pointer; accent-color:#2563eb;
+    }
+    .req-bulk-count { color:#3b82f6; font-size:13px; font-weight:600; }
+    .req-bulk-approve-btn {
+      margin-left:auto; padding:9px 18px; border-radius:8px; border:0;
+      background:#059669; color:#fff; font-weight:600; cursor:pointer;
+      transition:background .15s, transform .05s; font-size:13.5px;
+    }
+    .req-bulk-approve-btn:hover:not(:disabled) { background:#047857; }
+    .req-bulk-approve-btn:active:not(:disabled) { transform:scale(.97); }
+    .req-bulk-approve-btn:disabled { background:#d1d5db; color:#6b7280; cursor:not-allowed; }
+    .req-item-cb {
+      display:flex; align-items:flex-start; gap:10px;
+    }
+    .req-item-cb input {
+      width:18px; height:18px; cursor:pointer; accent-color:#2563eb;
+      margin-top:2px; flex-shrink:0;
+    }
+    .req-item-body { flex:1; min-width:0; }
+
+    /* ==== TIKTOK LIVE DATA - DANH SÁCH KÊNH ==== */
+    .tt-chan-row {
+      display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+      padding:12px 14px; border:1px solid #e5e7eb; border-radius:10px;
+      margin-bottom:10px; background:#fff;
+    }
+    .tt-chan-row.connected { background:#f0fdf4; border-color:#bbf7d0; }
+    .tt-chan-name { font-weight:600; color:#111827; min-width:150px; }
+    .tt-chan-status { font-size:12.5px; color:#6b7280; flex:1; min-width:180px; }
+    .tt-chan-status.ok { color:#059669; font-weight:600; }
+    .tt-chan-scope-warn { color:#dc2626; font-size:11.5px; }
+    .tt-chan-acts { display:flex; gap:8px; flex-shrink:0; }
+    .tt-chan-acts button {
+      padding:7px 14px; border-radius:7px; border:0; cursor:pointer;
+      font-size:12.5px; font-weight:600;
+    }
+    .tt-btn-connect { background:#7c3aed; color:#fff; }
+    .tt-btn-connect:hover { background:#6d28d9; }
+    .tt-btn-load { background:#eff6ff; color:#1d4ed8; }
+    .tt-btn-load:hover { background:#dbeafe; }
+    .tt-btn-disconnect { background:#fef2f2; color:#dc2626; }
+    .tt-btn-disconnect:hover { background:#fee2e2; }
+
+    /* ==== POPUP YÊU CẦU SỬA CA (redesign) ==== */
+    .modal-box.modal-req {
+      max-width:560px; padding:0; overflow:hidden;
+      background:#fff; border-radius:14px;
+    }
+    .req-modal-header {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:14px 20px; background:linear-gradient(135deg,#8b5cf6,#ec4899);
+      color:#fff;
+    }
+    .req-modal-title { font-size:16px; font-weight:700; }
+    .req-modal-close {
+      background:rgba(255,255,255,0.2); border:0; color:#fff;
+      width:30px; height:30px; border-radius:8px; cursor:pointer;
+      font-size:14px; font-weight:600;
+    }
+    .req-modal-close:hover { background:rgba(255,255,255,0.35); }
+    .req-modal-body { padding:16px 20px; max-height:65vh; overflow-y:auto; }
+    .req-modal-info {
+      background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px;
+      padding:10px 14px; font-size:13px; color:#374151;
+      margin-bottom:10px;
+    }
+    .req-modal-info b { color:#111827; }
+    .req-modal-hint {
+      color:#6b7280; font-size:12.5px; margin:0 0 16px;
+      padding:8px 12px; background:#fef9c3; border-left:3px solid #eab308; border-radius:6px;
+    }
+    .req-modal-section {
+      margin-bottom:14px;
+      border:1px solid #e5e7eb; border-radius:10px; padding:12px 14px;
+      background:#fafafa;
+    }
+    .req-modal-section-title {
+      font-size:12px; font-weight:700; color:#6b7280;
+      text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px;
+    }
+    .req-modal-footer {
+      display:flex; gap:10px; justify-content:flex-end;
+      padding:14px 20px; background:#f9fafb; border-top:1px solid #e5e7eb;
+    }
+    .req-modal-footer .btn, .req-modal-footer .btn-ghost {
+      padding:9px 18px; font-weight:600;
+    }
+
+    /* ==== CARD DUYỆT YÊU CẦU (context ca đầy đủ) ==== */
+    .req-shift-ctx {
+      background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px;
+      padding:12px 14px; margin:10px 0;
+    }
+    .req-shift-ctx-title {
+      font-size:11px; font-weight:700; color:#6b7280;
+      text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px;
+    }
+    .req-shift-ctx-grid {
+      display:grid; grid-template-columns:1fr 1fr; gap:8px 20px;
+      font-size:13px;
+    }
+    .req-shift-ctx-grid > div {
+      display:flex; justify-content:space-between; align-items:center; gap:8px;
+    }
+    .req-shift-ctx-grid .k { color:#6b7280; }
+    .req-shift-ctx-grid .v { color:#111827; font-weight:500; text-align:right; }
+    .req-shift-ctx-note { grid-column:1 / span 2; display:block !important; }
+    .req-shift-ctx-note .k { display:block; margin-bottom:2px; }
+    .req-shift-ctx-note .v { text-align:left; color:#4b5563; font-style:italic; }
+    .req-changes-title {
+      font-size:11px; font-weight:700; color:#6b7280;
+      text-transform:uppercase; letter-spacing:.5px;
+      margin:12px 0 6px;
+    }
+
+    /* ==== DIFF ROW ĐẸP HƠN ==== */
+    .req-diff { display:flex; flex-direction:column; gap:6px; }
+    .req-diff-row {
+      display:grid; grid-template-columns:110px 1fr auto 1fr;
+      align-items:center; gap:10px;
+      padding:6px 10px; background:#fff; border:1px solid #e5e7eb; border-radius:8px;
+      font-size:13px;
+    }
+    .req-diff-lbl { font-weight:600; color:#374151; font-size:12px; }
+    .req-old { color:#9ca3af; text-decoration:line-through; text-align:right; }
+    .req-arrow { color:#8b5cf6; font-weight:700; text-align:center; }
+    .req-new { color:#059669; font-weight:700; }
+    .req-old.money, .req-new.money { font-variant-numeric:tabular-nums; }
+    .req-old.time, .req-new.time { font-family:ui-monospace,SFMono-Regular,monospace; letter-spacing:.5px; }
+    .req-diff-empty { color:#9ca3af; font-style:italic; font-size:12px; padding:6px 10px; }
+    @media (max-width:600px){
+      .req-diff-row { grid-template-columns:1fr auto 1fr; }
+      .req-diff-lbl { grid-column:1 / span 3; margin-bottom:-2px; }
+      .req-shift-ctx-grid { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="authScreen">
+    <div class="auth-card">
+      <span class="kicker">Livestream Ops</span>
+      <h1>EAZ Chấm công</h1>
+      <p class="auth-sub">Đăng nhập để tiếp tục</p>
+      <div class="field"><label>Tài khoản</label><input type="text" id="lg_user" autocomplete="username"></div>
+      <div class="field"><label>Mật khẩu</label>
+        <div class="pass-wrap">
+          <input type="password" id="lg_pass" autocomplete="current-password">
+          <button type="button" class="pass-toggle" id="lg_passToggle" aria-label="Xem mật khẩu">👁</button>
+        </div>
+      </div>
+      <button class="btn" id="lg_btn">Đăng nhập</button>
+      <div class="auth-msg" id="authMsg"></div>
+    </div>
+  </div>
+
+  <div class="wrap" id="wrap" style="display:none;">
+    <header>
+      <div class="brand">
+        <span class="kicker">Livestream Ops</span>
+        <h1>EAZ Chấm công - Livestream</h1>
+        <p>Chúc bạn có 1 ngày làm việc nhiều Năng lượng &lt;3</p>
+      </div>
+      <div class="clock">
+        <div class="t" id="liveClock">--:--</div>
+        <div class="d" id="liveDate"></div>
+      </div>
+      <div class="userbox" id="userBox" style="display:none">
+        <div class="ub-info"><span class="ub-name" id="userName"></span><span class="ub-role" id="userRole"></span></div>
+        <button class="ub-btn" id="changePwBtn" title="Đổi mật khẩu">Đổi MK</button>
+        <button class="ub-btn" id="logoutBtn" title="Đăng xuất">Đăng xuất</button>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="dashboard">Chấm công<span class="tab-badge" id="dashTabBadge" style="display:none;"></span></button>
+      <button class="tab" data-tab="overview">Tổng quan</button>
+      <button class="tab" data-tab="payroll">Bảng lương</button>
+      <button class="tab" data-tab="manage">Quản lý</button>
+      <button class="tab" data-tab="users">Tài khoản</button>
+    </div>
+
+    <section id="tab-dashboard">
+    <div class="summary" id="summary"></div>
+
+    <!-- PANEL ĐANG LIVE -->
+    <div class="card live-card-wrap" id="liveNowCard">
+      <div class="card-head"><h2><span class="live-dot-blink"></span> Đang live</h2></div>
+      <div id="liveNow"></div>
+    </div>
+
+    <!-- YÊU CẦU CHỜ DUYỆT (Owner/Lead) -->
+    <div class="card req-approve-wrap" id="reqApproveCard" style="display:none;">
+      <div class="card-head"><h2>⏳ Yêu cầu chờ duyệt <span class="req-count" id="reqApproveCount">0</span></h2></div>
+      <div class="req-bulk-toolbar" id="reqBulkToolbar" style="display:none;">
+        <label class="req-bulk-selectall"><input type="checkbox" id="reqSelectAll"> Chọn tất cả</label>
+        <span class="req-bulk-count" id="reqBulkCount">0 mục đã chọn</span>
+        <button class="req-bulk-approve-btn" id="reqBulkApproveBtn" disabled>✓ Duyệt các mục đã chọn</button>
+      </div>
+      <div id="reqApproveList"></div>
+    </div>
+
+    <!-- YÊU CẦU CỦA TÔI (Nhân viên) -->
+    <div class="card" id="myReqCard" style="display:none;">
+      <div class="card-head"><h2>Yêu cầu sửa của tôi</h2></div>
+      <div id="myReqList"></div>
+    </div>
+
+    <div class="grid" id="grid-dashboard">
+      <!-- CỘT TRÁI -->
+      <div class="col" id="colForm">
+      <!-- CHECK-IN / CHECK-OUT (nhân viên) -->
+      <div class="card" id="checkCard" style="display:none;">
+        <div class="card-head"><h2 id="checkTitle">Chấm công ca live</h2></div>
+        <p class="hint" id="checkHint">Check-in khi bắt đầu ca, check-out khi kết thúc. Mỗi lần cần chụp 1 ảnh.</p>
+
+        <div id="checkInForm">
+          <div class="row2">
+            <div class="field">
+              <label>Vị trí</label>
+              <select id="ci_position">
+                <option value="Host Live">Host Live</option>
+                <option value="LA">Livestream Assistant (LA)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Kênh</label>
+              <select id="ci_channel"><option value="">— Chọn kênh —</option></select>
+            </div>
+          </div>
+          <div class="field">
+            <label>GMV đầu ca</label>
+            <input type="text" id="ci_gmv" inputmode="numeric" placeholder="VD: 5.000.000">
+          </div>
+          <div class="field">
+            <label>Ảnh đầu ca (bắt buộc)</label>
+            <div class="photo-pick">
+              <input type="file" accept="image/*" capture="environment" id="ci_photo" hidden>
+              <button type="button" class="btn-ghost" id="ci_photoBtn">📷 Chụp ảnh</button>
+              <img id="ci_preview" class="photo-preview" style="display:none;">
+            </div>
+          </div>
+          <button class="btn" id="checkInBtn"><span class="spinner"></span><span>Check-in (bắt đầu ca)</span></button>
+        </div>
+
+        <div id="checkOutForm" style="display:none;">
+          <div class="open-info" id="ci_openInfo"></div>
+          <div class="field">
+            <label>GMV cuối ca</label>
+            <input type="text" id="co_gmv" inputmode="numeric" placeholder="VD: 17.500.000">
+          </div>
+          <div class="field">
+            <label>Ảnh cuối ca (bắt buộc)</label>
+            <div class="photo-pick">
+              <input type="file" accept="image/*" capture="environment" id="co_photo" hidden>
+              <button type="button" class="btn-ghost" id="co_photoBtn">📷 Chụp ảnh</button>
+              <img id="co_preview" class="photo-preview" style="display:none;">
+            </div>
+          </div>
+          <button class="btn" id="checkOutBtn"><span class="spinner"></span><span>Check-out (kết thúc ca)</span></button>
+        </div>
+      </div>
+
+      <!-- FORM -->
+      <div class="card" id="manualFormCard">
+        <div class="card-head">
+          <h2>Khai báo ca làm</h2>
+          <span class="badge-edit">Đang sửa</span>
+        </div>
+        <p class="hint">Điền sau khi kết thúc ca.</p>
+
+        <div class="field">
+          <label>Ngày live</label>
+          <input type="date" id="f_date">
+        </div>
+
+        <div class="field" id="nameSelectWrap">
+          <label>Tên nhân sự</label>
+          <select id="f_nameSelect">
+            <option value="">— Chọn nhân sự —</option>
+            <option value="__new__">+ Nhân sự mới…</option>
+          </select>
+          <input type="text" id="f_nameNew" placeholder="Nhập tên nhân sự mới" autocomplete="off" style="display:none; margin-top:10px;">
+        </div>
+        <div class="field" id="f_nameLockedWrap" style="display:none;">
+          <label>Nhân sự</label>
+          <div class="locked-val" id="f_nameLocked"></div>
+        </div>
+
+        <div class="row2">
+          <div class="field">
+            <label>Vị trí</label>
+            <select id="f_position">
+              <option value="Host Live">Host Live</option>
+              <option value="LA">Livestream Assistant (LA)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Kênh</label>
+            <select id="f_channel">
+              <option value="">— Chọn kênh —</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row2">
+          <div class="field">
+            <label>Bắt đầu ca</label>
+            <input type="time" id="f_start">
+          </div>
+          <div class="field">
+            <label>Kết thúc ca</label>
+            <input type="time" id="f_end">
+          </div>
+        </div>
+
+        <div class="duration-box">
+          <span class="lbl">Thời lượng live</span>
+          <span class="v" id="durationOut">0h 00m</span>
+        </div>
+
+        <div class="row2">
+          <div class="field">
+            <label>GMV đầu ca</label>
+            <input type="text" id="f_gmvStart" inputmode="numeric" placeholder="VD: 5.000.000">
+          </div>
+          <div class="field">
+            <label>GMV cuối ca</label>
+            <input type="text" id="f_gmvEnd" inputmode="numeric" placeholder="VD: 17.500.000">
+          </div>
+        </div>
+
+        <div class="duration-box gmv-box">
+          <span class="lbl">GMV ghi nhận</span>
+          <span class="v" id="gmvOut">0đ</span>
+        </div>
+
+        <div class="field">
+          <label>Ghi chú (tuỳ chọn)</label>
+          <input type="text" id="f_note" placeholder="VD: live ra mắt sản phẩm mới">
+        </div>
+
+        <button class="btn" id="saveBtn">
+          <span class="spinner"></span>
+          <span id="saveLabel">Lưu ca làm</span>
+        </button>
+        <button class="btn-cancel" id="cancelBtn">Huỷ sửa</button>
+      </div>
+      </div><!-- /col trái -->
+
+      <!-- CỘT PHẢI -->
+      <div class="col">
+      <!-- RECORDS -->
+      <div class="card">
+        <div class="card-head"><h2>Lịch sử ca live</h2></div>
+        <p class="hint">Dữ liệu lấy trực tiếp từ Google Sheets.</p>
+
+        <div class="toolbar">
+          <select id="filterPeriod">
+            <option value="all">Tất cả thời gian</option>
+            <option value="today">Hôm nay</option>
+            <option value="week">Tuần này</option>
+            <option value="month">Tháng này</option>
+            <option value="custom">Khoảng tuỳ chọn…</option>
+          </select>
+          <input type="date" id="filterFrom" style="display:none" title="Từ ngày">
+          <input type="date" id="filterTo" style="display:none" title="Đến ngày">
+          <select id="filterChannel">
+            <option value="">Tất cả kênh</option>
+          </select>
+          <input type="text" id="filterName" placeholder="Lọc theo tên...">
+          <button class="btn-ghost" id="exportBtn" title="Xuất dữ liệu đang lọc ra file Excel (.xlsx) gồm 4 sheet">📊 Xuất Excel</button>
+        </div>
+
+        <div class="hist-list" id="historyList"></div>
+        <div class="empty" id="emptyState" style="display:none;">
+          <div class="big">🎬</div>Chưa có ca live nào được ghi nhận.
+        </div>
+
+        <div class="breakdown" id="breakdown"></div>
+      </div>
+      </div><!-- /col phải -->
+    </div>
+    </section>
+
+    <section id="tab-overview" style="display:none;">
+      <div class="ov-head">
+        <h2>Tổng quan hiệu suất</h2>
+        <div class="period-ctrl">
+          <select id="ovChannel"><option value="">Tất cả kênh</option></select>
+          <select id="ovDayTypeFilter">
+            <option value="">Tất cả loại ngày</option>
+            <option value="mega">Mega Sale</option>
+            <option value="mini">Mini Sale</option>
+            <option value="normal">Ngày thường</option>
+          </select>
+          <select id="ovPeriod">
+            <option value="all">Tất cả thời gian</option>
+            <option value="today">Hôm nay</option>
+            <option value="week">Tuần này</option>
+            <option value="month" selected>Tháng này</option>
+            <option value="custom">Khoảng tuỳ chọn…</option>
+          </select>
+          <input type="date" id="ovFrom" style="display:none" title="Từ ngày">
+          <input type="date" id="ovTo" style="display:none" title="Đến ngày">
+        </div>
+      </div>
+      <div class="summary" id="ovSummary"></div>
+      <div id="ovDupCard" style="margin-top:20px; display:none;"></div>
+      <div class="card" style="margin-top:20px;">
+        <h2 id="ovTrendTitle">Doanh số kênh theo ngày</h2>
+        <div id="ovTrend"></div>
+      </div>
+      <div class="card" style="margin-top:20px;">
+        <h2>Hiệu quả theo loại ngày Sale</h2>
+        <div id="ovDayType"></div>
+      </div>
+      <div class="card" style="margin-top:20px;">
+        <h2>Hiệu suất theo kênh</h2>
+        <div id="ovChannels"></div>
+      </div>
+      <div class="card" style="margin-top:20px;">
+        <h2>Chi tiết nhân sự theo kênh</h2>
+        <div id="ovStaff"></div>
+      </div>
+    </section>
+
+    <section id="tab-payroll" style="display:none;">
+      <div class="ov-head">
+        <h2>Bảng lương</h2>
+        <div class="pay-subnav">
+          <button class="pay-subtab active" data-payview="result">Kết quả</button>
+          <button class="pay-subtab" data-payview="fixed" id="payFixedTab">Lương cứng</button>
+          <button class="pay-subtab" data-payview="config" id="payConfigTab">Cấu hình</button>
+        </div>
+      </div>
+
+      <div id="payView-result">
+        <div class="card">
+          <div class="pay-bar">
+            <div class="field" style="margin:0;"><label>Tháng lương</label><input type="month" id="payMonth"></div>
+            <div class="field" style="margin:0;" id="payReturnWrap"><label>Tỷ lệ hoàn huỷ (%)</label><input type="number" id="payReturn" min="0" max="100" step="0.1" value="0"></div>
+            <div class="field" style="margin:0;" id="payChannelFilterWrap">
+              <label>Lọc kênh</label>
+              <div id="payChannelFilter" class="chan-filter">
+                <button type="button" class="chan-filter-btn" id="payChannelFilterBtn">Tất cả kênh <span class="k-caret">▾</span></button>
+                <div class="chan-filter-menu" id="payChannelFilterMenu" style="display:none;"></div>
+              </div>
+            </div>
+            <button class="btn" id="payCalcBtn" style="align-self:flex-end; width:auto; padding:11px 18px;">Cập nhật &amp; tính lương</button>
+            <button class="btn-ghost" id="payExportBtn" style="align-self:flex-end; width:auto; padding:11px 18px;" title="Xuất bảng lương chi tiết theo kênh (.xlsx)">📊 Xuất Excel</button>
+            <button class="btn-lock" id="payLockBtn" style="align-self:flex-end; width:auto; padding:11px 18px; display:none;" title="Chốt lương tháng (Owner)">🔒 Chốt tháng</button>
+            <button class="btn-unlock" id="payUnlockBtn" style="align-self:flex-end; width:auto; padding:11px 18px; display:none;" title="Mở chốt để sửa lại (Owner)">🔓 Mở chốt</button>
+          </div>
+          <div id="payLockBadge" style="display:none;"></div>
+          <p class="hint" style="margin:10px 0 0;">Nhập <b>tỷ lệ hoàn huỷ</b> + <b>điểm phòng live</b> từng người (trong bảng kết quả), rồi bấm "Cập nhật &amp; tính lương". Bấm vào mỗi nhân viên để xem chi tiết từng kênh/vai trò.</p>
+        </div>
+        <div class="pay-total pay-total-top"><span>Tổng quỹ lương tháng</span><span class="v" id="payTotal">0đ</span></div>
+        <div id="payResult"></div>
+      </div>
+
+      <div id="payView-fixed" style="display:none;">
+        <div class="card">
+          <div class="pay-bar">
+            <div class="field" style="margin:0;"><label>Tháng</label><input type="month" id="fixedMonth"></div>
+            <button class="btn" id="fixedSaveBtn" style="align-self:flex-end; width:auto; padding:11px 18px;">💾 Lưu lương cứng tháng</button>
+          </div>
+          <p class="hint" style="margin:10px 0 0;">Nhân sự lương cứng có thể nhận tiền từ <b>nhiều kênh</b>, mỗi kênh 1 số riêng. Số tiền có thể thay đổi từng tháng. Thêm NV mới ở tab <b>Quản lý</b>.</p>
+        </div>
+        <div id="fixedSalaryList"></div>
+      </div>
+
+      <div id="payView-config" style="display:none;">
+        <div class="card"><div class="card-head"><h2>Đơn giá giờ theo vai trò</h2></div>
+          <p class="hint" style="margin:0 0 12px;">Mỗi nhân viên có đơn giá Host và Trợ live riêng (đồng/giờ).</p>
+          <div id="cfgHourly"></div></div>
+        <div class="card"><div class="card-head"><h2>Mốc thưởng</h2></div>
+          <p class="hint" style="margin:0 0 12px;">Mốc GMV/h và Mốc NMV riêng cho từng Nhân viên × Kênh × Vai trò.</p>
+          <div id="cfgMoc"></div></div>
+        <div class="card" id="cfgChungCard"><div class="card-head"><h2>Cấu hình chung</h2></div>
+          <p class="hint" style="margin:0 0 12px;">Hệ số, trần, % thưởng theo vị trí, VAT, mốc điểm — áp dụng cho toàn hệ thống.</p>
+          <div id="cfgChung"></div></div>
+      </div>
+    </section>
+
+    <section id="tab-manage" style="display:none;">
+      <div class="manage-grid">
+        <!-- QUẢN LÝ KÊNH -->
+        <div class="card">
+          <div class="card-head"><h2>Kênh bán <span class="count-pill" id="channelCount"></span></h2></div>
+          <p class="hint">Danh sách kênh cho dropdown chấm công. Lưu ở sheet "Kenh".</p>
+          <div class="staff-add manage-add" id="channelAddWrap">
+            <input type="text" id="c_name" placeholder="Tên kênh mới" autocomplete="off">
+            <button class="btn-ghost" id="addChannelBtn">Thêm</button>
+          </div>
+          <div class="staff-list" id="channelList"></div>
+        </div>
+
+        <!-- QUẢN LÝ NHÂN SỰ -->
+        <div class="card">
+          <div class="card-head"><h2>Nhân sự <span class="count-pill" id="staffCount"></span></h2></div>
+          <p class="hint">Danh sách nhân sự cho dropdown chấm công. Lưu ở sheet "NhanSu". Nếu trùng tên, điền Mã NV để phân biệt.</p>
+          <div class="staff-add manage-add" id="staffAddWrap">
+            <input type="text" id="s_name" placeholder="Tên nhân sự mới" autocomplete="off">
+            <input type="text" id="s_code" placeholder="Mã NV" autocomplete="off" class="code-input">
+            <button class="btn-ghost" id="addStaffBtn">Thêm</button>
+          </div>
+          <input type="text" id="staffSearch" class="list-search" placeholder="Tìm nhân sự…" autocomplete="off">
+          <div class="staff-rows" id="staffList"></div>
+        </div>
+      </div>
+
+      <!-- TIKTOK LIVE DATA — PREVIEW (chỉ Owner, theo từng KÊNH) -->
+      <div class="card" id="ttLiveDataCard" style="margin-top:20px; display:none;">
+        <div class="card-head"><h2>🎬 TikTok Live Data <span class="dup-tag" style="background:#fde68a;color:#92400e;">Preview</span></h2></div>
+        <p class="hint">Mỗi kênh TikTok là 1 tài khoản riêng — cần cấp quyền riêng cho từng kênh. Tính năng đang thử nghiệm, chỉ Owner thấy được.</p>
+        <div id="ttChannelList"></div>
+        <pre id="ttPreviewOutput" style="margin-top:14px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px; padding:14px; font-size:12px; white-space:pre-wrap; max-height:400px; overflow:auto; display:none;"></pre>
+      </div>
+
+      <!-- NHÂN SỰ LƯƠNG CỨNG (Owner) -->
+      <div class="card" id="fixedStaffCard" style="margin-top:20px; display:none;">
+        <div class="card-head"><h2>Nhân sự lương cứng <span class="count-pill" id="fixedStaffCount"></span></h2></div>
+        <p class="hint">Danh sách NV nhận lương cứng theo tháng (không tính GMV/giờ live). Có thể gán cho nhiều kênh, mỗi kênh 1 số tiền, điều chỉnh từng tháng.</p>
+        <div class="staff-add manage-add">
+          <input type="text" id="fs_name" placeholder="Tên nhân sự lương cứng" autocomplete="off">
+          <input type="text" id="fs_role" placeholder="Vai trò (VD: Kế toán, IT)" autocomplete="off" class="code-input">
+          <button class="btn-ghost" id="fs_addBtn">Thêm</button>
+        </div>
+        <input type="text" id="fs_search" class="list-search" placeholder="Tìm nhân sự lương cứng…" autocomplete="off">
+        <div class="staff-rows" id="fixedStaffList"></div>
+      </div>
+
+      <!-- IMPORT LỊCH SỬ (chỉ Owner) -->
+      <div class="card" id="importCard" style="margin-top:20px; display:none;">
+        <div class="card-head"><h2>Import lịch sử ca live</h2></div>
+        <div class="field" style="margin-bottom:8px;">
+          <label>Dữ liệu giờ của bạn</label>
+          <div class="radio-row">
+            <label><input type="radio" name="importMode" value="times" checked> Có giờ bắt đầu &amp; kết thúc</label>
+            <label><input type="radio" name="importMode" value="hours"> Chỉ có tổng giờ</label>
+          </div>
+        </div>
+        <p class="hint" id="importHint"></p>
+        <textarea id="importBox" class="import-box" rows="8"></textarea>
+        <div class="form-actions">
+          <button class="btn-ghost" id="importPreviewBtn">Xem trước</button>
+          <button class="btn" id="importBtn">Import dữ liệu</button>
+        </div>
+        <div id="importPreview" style="display:none; margin-top:12px;"></div>
+        <div id="importResult" class="hint" style="margin-top:8px;"></div>
+      </div>
+    </section>
+
+    <section id="tab-users" style="display:none;">
+      <div class="ov-head">
+        <h2>Tài khoản</h2>
+        <button class="btn" id="toggleCreateUser" style="width:auto;padding:11px 20px;box-shadow:none;">+ Tạo tài khoản</button>
+      </div>
+
+      <div class="card" id="userFormCard" style="display:none; margin-bottom:16px;">
+        <div class="card-head"><h2 id="userFormTitle">Tạo tài khoản</h2></div>
+        <p class="hint" id="nu_hint">Tạo & phân quyền tài khoản. Mật khẩu được mã hoá khi lưu.</p>
+        <div class="field" id="nu_userWrap"><label>Tên đăng nhập</label><input type="text" id="nu_user" autocomplete="off"></div>
+        <div class="field" id="nu_passWrap"><label>Mật khẩu</label><input type="text" id="nu_pass" autocomplete="off" placeholder="Tối thiểu 4 ký tự"></div>
+        <div class="field" id="nu_roleWrap"><label>Vai trò</label>
+          <select id="nu_role">
+            <option value="staff">Nhân viên</option>
+            <option value="lead">Lead kênh</option>
+            <option value="admin">Admin</option>
+            <option value="owner">Owner</option>
+          </select>
+        </div>
+        <div class="field" id="nu_channelWrap"><label id="nu_channelLabel">Kênh phụ trách (chọn nhiều)</label><div id="nu_channel" class="chk-list"></div></div>
+        <div class="field" id="nu_staffWrap"><label>Gắn với nhân sự</label><select id="nu_staff"></select>
+          <input type="text" id="nu_newStaff" placeholder="… hoặc nhập tên nhân sự mới" style="margin-top:8px;">
+          <p class="hint" style="margin:6px 0 0;">Chọn nhân sự có sẵn, hoặc gõ tên nhân sự mới vào ô dưới (sẽ tự thêm vào danh sách).</p>
+        </div>
+        <div class="field" id="nu_managedWrap" style="display:none;"><label>Kênh quản lý – quyền Lead Live (tuỳ chọn, chọn nhiều)</label><div id="nu_managed" class="chk-list"></div><p class="hint" style="margin:6px 0 0;">Gán kênh ở đây để nhân viên này xem thêm được hiệu suất (ca live, giờ, GMV) của kênh đó. Vẫn không xem được lương người khác.</p></div>
+        <div class="form-actions">
+          <button class="btn" id="nu_createBtn">Tạo tài khoản</button>
+          <button class="btn-ghost" id="nu_cancelBtn">Huỷ</button>
+        </div>
+      </div>
+
+      <div class="card" id="usersListCard">
+        <div class="card-head"><h2>Danh sách tài khoản</h2></div>
+        <input type="text" id="userSearch" class="list-search" placeholder="🔍 Tìm theo tài khoản, nhân sự, kênh, vai trò…" autocomplete="off">
+        <p class="hint">✎ sửa vai trò/phạm vi · 🔑 đặt lại mật khẩu · ✕ xoá tài khoản.</p>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Tài khoản</th><th>Vai trò</th><th>Nhân sự</th><th>Kênh</th><th></th></tr></thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <div id="photoModal" class="modal" style="display:none;">
+      <div class="modal-box">
+        <div class="modal-head"><span id="photoModalTitle">Ảnh chấm công</span><button class="modal-x" id="photoModalClose">✕</button></div>
+        <div class="modal-body" id="photoModalBody"></div>
+      </div>
+    </div>
+
+    <div id="confirmModal" class="modal" style="display:none;">
+      <div class="modal-box confirm-box">
+        <div class="confirm-title" id="confirmTitle">Xác nhận</div>
+        <div class="confirm-msg" id="confirmMsg"></div>
+        <div class="confirm-actions">
+          <button class="btn-ghost" id="confirmCancel">Huỷ</button>
+          <button class="btn" id="confirmOk">Xác nhận</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="channelModal" class="modal" style="display:none;">
+      <div class="modal-box confirm-box">
+        <div class="confirm-title">Kênh bạn đang làm</div>
+        <div class="confirm-msg">Chọn các kênh hiện tại bạn đang livestream. Khi check-in vào kênh mới, kênh đó cũng được tự thêm vào đây.</div>
+        <div id="cm_list" class="chk-list" style="margin-top:14px; max-height:260px; overflow:auto;"></div>
+        <div class="confirm-actions">
+          <button class="btn-ghost" id="cm_cancel">Để sau</button>
+          <button class="btn" id="cm_save">Lưu</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: YÊU CẦU SỬA CA (Nhân viên) -->
+    <div id="reqModal" class="modal" style="display:none;">
+      <div class="modal-box modal-req">
+        <div class="req-modal-header">
+          <div class="req-modal-title">📝 Yêu cầu sửa ca live</div>
+          <button class="req-modal-close" id="rq_cancel" title="Đóng">✕</button>
+        </div>
+        <div class="req-modal-body">
+          <div class="req-modal-info" id="rq_info"></div>
+          <p class="req-modal-hint">Sửa các thông tin cần thay đổi rồi bấm gửi. <b>Cấp trên sẽ duyệt</b> trước khi áp dụng vào ca thật.</p>
+          <input type="hidden" id="rq_shiftId">
+
+          <div class="req-modal-section">
+            <div class="req-modal-section-title">Vị trí &amp; Kênh</div>
+            <div class="row2">
+              <div class="field"><label>Vị trí</label>
+                <select id="rq_position">
+                  <option value="Host Live">Host Live</option>
+                  <option value="LA">LA (Trợ live)</option>
+                </select>
+              </div>
+              <div class="field"><label>Kênh</label>
+                <select id="rq_channel"></select>
+              </div>
+            </div>
+          </div>
+
+          <div class="req-modal-section">
+            <div class="req-modal-section-title">Thời gian</div>
+            <div class="row2">
+              <div class="field"><label>Giờ bắt đầu</label><input type="time" id="rq_start"></div>
+              <div class="field"><label>Giờ kết thúc</label><input type="time" id="rq_end"></div>
+            </div>
+          </div>
+
+          <div class="req-modal-section">
+            <div class="req-modal-section-title">Doanh số</div>
+            <div class="row2">
+              <div class="field"><label>GMV đầu ca (đ)</label><input type="text" id="rq_gmvStart" inputmode="numeric" placeholder="0"></div>
+              <div class="field"><label>GMV cuối ca (đ)</label><input type="text" id="rq_gmvEnd" inputmode="numeric" placeholder="0"></div>
+            </div>
+          </div>
+
+          <div class="req-modal-section">
+            <div class="req-modal-section-title">Ghi chú</div>
+            <div class="field"><input type="text" id="rq_note" placeholder="Ghi chú lý do sửa (VD: quên chấm ra, ghi nhầm GMV...)"></div>
+          </div>
+        </div>
+        <div class="req-modal-footer">
+          <button class="btn-ghost" id="rq_cancel2">Huỷ</button>
+          <button class="btn" id="rq_submit">📤 Gửi yêu cầu</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: SỬA CA TỪ CARD CA TRÙNG (Owner/Lead) -->
+    <div id="dupEditModal" class="modal" style="display:none;">
+      <div class="modal-box">
+        <div class="confirm-title">Sửa ca (từ danh sách trùng)</div>
+        <div class="req-modal-info" id="dm_info"></div>
+        <p class="hint" style="margin:4px 0 14px;">Áp dụng thay đổi ngay không cần duyệt.</p>
+        <div class="row2">
+          <div class="field"><label>Vị trí</label>
+            <select id="dm_position">
+              <option value="Host Live">Host Live</option>
+              <option value="LA">LA (Trợ live)</option>
+            </select>
+          </div>
+          <div class="field"><label>Kênh</label>
+            <select id="dm_channel"></select>
+          </div>
+        </div>
+        <div class="field"><label>Ngày live</label><input type="date" id="dm_date"></div>
+        <div class="row2">
+          <div class="field"><label>Bắt đầu</label><input type="time" id="dm_start"></div>
+          <div class="field"><label>Kết thúc</label><input type="time" id="dm_end"></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>GMV đầu ca (đ)</label><input type="text" id="dm_gmvStart" inputmode="numeric"></div>
+          <div class="field"><label>GMV cuối ca (đ)</label><input type="text" id="dm_gmvEnd" inputmode="numeric"></div>
+        </div>
+        <div class="field"><label>Ghi chú</label><input type="text" id="dm_note" placeholder="Ghi chú (nếu có)"></div>
+        <div class="confirm-actions">
+          <button class="btn-ghost" id="dm_cancel">Huỷ</button>
+          <button class="btn" id="dm_save">Lưu thay đổi</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: TỪ CHỐI YÊU CẦU (Owner/Lead) -->
+    <div id="rejectModal" class="modal" style="display:none;">
+      <div class="modal-box">
+        <div class="confirm-title">Từ chối yêu cầu</div>
+        <p class="hint" style="margin:4px 0 12px;">Lý do sẽ hiện cho nhân viên để họ biết vì sao.</p>
+        <div class="field"><label>Lý do từ chối</label><textarea id="rj_reason" rows="3" placeholder="Ví dụ: GMV chưa khớp với báo cáo, vui lòng kiểm tra lại..."></textarea></div>
+        <div class="confirm-actions">
+          <button class="btn-ghost" id="rj_cancel">Huỷ</button>
+          <button class="btn btn-danger" id="rj_confirm">Từ chối yêu cầu</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="footnote">Được phát triển bởi Luật Sư Lê Hùng<span id="dbLink"></span></p>
+  </div>
+
+  <div id="toasts"></div>
+  <div id="overlay"><div class="ld"></div></div>
+
+  <script src="assets/shim.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>
