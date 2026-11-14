@@ -915,7 +915,9 @@
       if(pend && pend[r.id]) reqHtml = '<span class="req-badge pending">⏳ Chờ duyệt</span>';
       else reqHtml = '<button class="act act-req" title="Yêu cầu sửa" data-req="'+r.id+'">✎ Yêu cầu sửa</button>';
     }
-    return '<div class="hist-item'+(r.open?' is-open':'')+'">'
+    var gw = (AUTH.role !== 'staff') ? (getGmvWarnings()[r.id] || null) : null;
+    var warnHtml = gw ? '<div class="gmv-warn" title="'+esc(gw.join('\n'))+'"><b>⚠ Kiểm tra số GMV</b><ul>'+gw.map(function(m){ return '<li>'+esc(m)+'</li>'; }).join('')+'</ul></div>' : '';
+    return '<div class="hist-item'+(r.open?' is-open':'')+(gw?' has-warn':'')+'">'
       + '<div class="hi-top">'
         + '<span class="pill '+posCls+'">'+esc(r.position)+'</span>'
         + '<span class="hi-name">'+esc(r.name)+'</span>'
@@ -926,6 +928,7 @@
         + '<span class="hi-dur">'+(r.open?'':('· '+fmtDur(hoursD)))+'</span>'
         + '<span class="hi-gmv">'+(r.open?'':(fmtVND(r.gmv)+'đ'))+'</span>'
       + '</div>'
+      + warnHtml
       + (reqHtml ? '<div class="hi-req">'+reqHtml+'</div>' : '')
       + '</div>';
   }
@@ -1033,25 +1036,91 @@
   // Khoảng thời gian của ca theo phút; ca qua đêm (kết thúc < bắt đầu) thì +24h.
   function shiftInterval(r){ var s = toMin(r.start), e = toMin(r.end); if(e <= s) e += 1440; return [s, e]; }
 
-  // Doanh số thật theo kênh+ngày: sắp các lần đọc GMV theo thời gian; mỗi lần con số tụt
-  // xuống = 1 phiên mới (bộ đếm reset). Doanh số = tổng (cao nhất − thấp nhất) mỗi phiên.
-  function channelRevenueByDay(rows){
-    // GMV thật của 1 ngày/kênh = tổng GMV các ca HOST (mỗi ca live tính 1 lần).
-    // Trợ live ghi cùng GMV chỉ để tính công, KHÔNG cộng vào doanh số.
-    var groups = {};
-    rows.forEach(function(r){
-      if(String(r.position).toLowerCase().indexOf('host') < 0) return; // chỉ Host
-      var k = r.channel + '|' + r.date;
-      var g = groups[k] = groups[k] || {revenue:0, sessions:0};
-      g.revenue += Number(r.gmv) || 0;
-      g.sessions += 1;
+  // ── DOANH SỐ KÊNH (không tính trùng khi nhiều Host live chồng giờ) ──
+  // Mỗi Host có GMV ca (cuối − đầu) trên khoảng giờ của mình => tốc độ GMV/phút.
+  // Mỗi đoạn giờ do k Host cùng phủ: GMV đoạn = độ dài × trung bình tốc độ của k Host đó.
+  // Cách này không phụ thuộc số tuyệt đối trên đồng hồ nên không sai khi đồng hồ về 0 (phiên live mới)
+  // hoặc khi 2 Host chỉ trùng một phần khung giờ. Trợ live ghi cùng GMV chỉ để tính công, KHÔNG cộng vào doanh số.
+  function hostRateSegments(shifts){
+    var iv = [];
+    shifts.forEach(function(r){
+      if(String(r.position).toLowerCase().indexOf('host') < 0 || r.open || !r.end) return;
+      var s = toMin(r.start), e = toMin(r.end); if(e <= s) e += 1440;
+      var d = e - s; if(d <= 0) return;
+      var g = Math.max(0, (Number(r.gmvEnd)||0) - (Number(r.gmvStart)||0));
+      iv.push({ s:s, e:e, rate:g/d });
     });
-    var out = [];
+    var pts = {}; iv.forEach(function(x){ pts[x.s] = 1; pts[x.e] = 1; });
+    var p = Object.keys(pts).map(Number).sort(function(a,b){ return a-b; });
+    var segs = [], overlap = false;
+    for(var i = 0; i < p.length - 1; i++){
+      var a = p[i], b = p[i+1], sum = 0, k = 0;
+      iv.forEach(function(x){ if(x.s <= a && x.e >= b){ sum += x.rate; k++; } });
+      if(k){ segs.push({ a:a, b:b, rate:sum/k }); if(k > 1) overlap = true; }
+    }
+    return { segs:segs, overlap:overlap, hosts:iv.length };
+  }
+  function groupByChannelDay(rows){
+    var groups = {};
+    rows.forEach(function(r){ var k = r.channel + '|' + r.date; (groups[k] = groups[k] || []).push(r); });
+    return groups;
+  }
+  function channelRevenueByDay(rows){
+    var groups = groupByChannelDay(rows), out = [];
     Object.keys(groups).forEach(function(k){
+      var h = hostRateSegments(groups[k]); if(!h.hosts) return;
+      var rev = 0; h.segs.forEach(function(sg){ rev += (sg.b - sg.a) * sg.rate; });
       var p = k.split('|');
-      out.push({ channel:p[0], date:p[1], revenue:groups[k].revenue, sessions:groups[k].sessions });
+      out.push({ channel:p[0], date:p[1], revenue:Math.round(rev), sessions:h.hosts, overlap:h.overlap });
     });
     return out;
+  }
+
+  // ── CẢNH BÁO ĐỒNG HỒ GMV (hiển thị cho Lead/Admin/Owner) ──
+  // Mỗi kênh chỉ chạy 1 phiên live; đồng hồ về 0 khi mở phiên mới (hợp lệ). Chỉ cảnh báo khi:
+  //  1) 2 Host ra ca cách nhau ≤15 phút mà Host ra sau ghi số THẤP hơn;
+  //  2) 2 Host vào ca cách nhau ≤15 phút mà Host vào sau ghi số THẤP hơn (số đầu ca > 0);
+  //  3) Host vào ca ngay sau khi Host khác ra (≤30 phút) với số THẤP hơn số cuối của ca trước, nhưng không về 0
+  //     (tụt từ 50% trở lên — tụt mạnh hơn coi là phiên live mới).
+  function gmvTol(m){ return Math.max(500000, 0.03*m); }
+  function fmtClock(m){ m = m % 1440; var h = Math.floor(m/60), mi = m % 60; return (h<10?'0':'')+h+':'+(mi<10?'0':'')+mi; }
+  function computeGmvWarnings(records){
+    var warns = {};
+    function add(id, msg){ (warns[id] = warns[id] || []); if(warns[id].indexOf(msg) < 0) warns[id].push(msg); }
+    var groups = groupByChannelDay(records.filter(function(r){ return String(r.position).toLowerCase().indexOf('host') >= 0; }));
+    Object.keys(groups).forEach(function(k){
+      var L = groups[k].map(function(r){
+        var s = toMin(r.start), e = r.open || !r.end ? null : toMin(r.end);
+        if(e !== null && e < s) e += 1440;
+        return { r:r, s:s, e:e, gs:Number(r.gmvStart)||0, ge:Number(r.gmvEnd)||0 };
+      });
+      for(var i = 0; i < L.length; i++){
+        for(var j = 0; j < L.length; j++){
+          if(i === j) continue; var A = L[i], B = L[j];
+          // 1) cùng giờ ra: B ra sau A (hoặc cùng phút) nhưng số thấp hơn
+          if(A.e !== null && B.e !== null && B.e >= A.e && B.e - A.e <= 15 && A.ge > 0 && B.ge < A.ge - gmvTol(A.ge)){
+            add(B.r.id, 'GMV cuối ca ('+fmtVND(B.ge)+'đ) thấp hơn '+A.r.name+' ('+fmtVND(A.ge)+'đ) dù ra ca sau/cùng giờ ('+fmtClock(A.e)+' → '+fmtClock(B.e)+'). Kiểm tra lại số đồng hồ cuối ca.');
+            add(A.r.id, 'GMV cuối ca của '+B.r.name+' (ra '+fmtClock(B.e)+') ghi thấp hơn ca này ('+fmtVND(B.ge)+'đ so với '+fmtVND(A.ge)+'đ). Kiểm tra lại cả hai.');
+          }
+          // 2) cùng giờ vào: B vào sau A nhưng số đầu ca thấp hơn (cả hai > 0)
+          if(B.s >= A.s && B.s - A.s <= 15 && A.gs > 0 && B.gs > 0 && B.gs < A.gs - gmvTol(A.gs)){
+            add(B.r.id, 'GMV đầu ca ('+fmtVND(B.gs)+'đ) thấp hơn '+A.r.name+' ('+fmtVND(A.gs)+'đ) dù vào ca sau/cùng giờ ('+fmtClock(A.s)+' → '+fmtClock(B.s)+'). Kiểm tra lại số đồng hồ đầu ca.');
+          }
+          // 3) nối ca: B vào ngay sau khi A ra, số đầu ca thấp hơn số cuối ca trước nhưng không về 0
+          if(A.e !== null && B.s >= A.e && B.s - A.e <= 30 && A.ge > 0 && B.gs > 0 && B.gs < A.ge - gmvTol(A.ge) && B.gs >= A.ge*0.5){
+            add(B.r.id, 'GMV đầu ca ('+fmtVND(B.gs)+'đ) thấp hơn GMV cuối ca của '+A.r.name+' ('+fmtVND(A.ge)+'đ, ra lúc '+fmtClock(A.e)+'). Đồng hồ không về 0 nên không phải phiên live mới — kiểm tra lại.');
+          }
+        }
+      }
+    });
+    return warns;
+  }
+  function getGmvWarnings(){
+    if(!state._gmvWarn || state._gmvWarnVer !== state.recVer){
+      try { state._gmvWarn = computeGmvWarnings(state.records || []); } catch(e){ state._gmvWarn = {}; }
+      state._gmvWarnVer = state.recVer;
+    }
+    return state._gmvWarn;
   }
 
   // ── XEM THEO GIỜ (khi chọn 1 ngày) ───────────────────────────────
@@ -1059,22 +1128,17 @@
   var SLOT_SIZE = 3;                 // số giờ mỗi khung
   var SLOT_COUNT = 24 / SLOT_SIZE;   // = 8 khung
 
-  // Doanh số theo khung giờ: chia đều GMV của mỗi ca HOST theo số phút ca trải qua từng khung.
+  // Doanh số theo khung giờ: rải đều GMV của từng đoạn giờ (đã loại phần Host trùng giờ) vào các khung 3 tiếng.
   function revenueBySlot(rows){
     var slots = []; for(var i=0;i<SLOT_COUNT;i++) slots.push(0);
-    rows.forEach(function(r){
-      if(String(r.position).toLowerCase().indexOf('host') < 0) return; // chỉ Host (giống biểu đồ ngày)
-      var gmv = Number(r.gmv) || 0;
-      var s = toMin(r.start), e = toMin(r.end);
-      if(e <= s) e += 1440;          // ca qua đêm: +24h
-      var dur = e - s; if(dur <= 0) return;
-      var rate = gmv / dur;          // GMV trên mỗi phút
-      // Rải từng phút vào khung tương ứng (giờ-trong-ngày = phút mod 1440)
-      for(var m = s; m < e; m++){
-        var hour = Math.floor((m % 1440) / 60);
-        var idx = Math.floor(hour / SLOT_SIZE);
-        slots[idx] += rate;
-      }
+    var groups = groupByChannelDay(rows);
+    Object.keys(groups).forEach(function(k){
+      hostRateSegments(groups[k]).segs.forEach(function(sg){
+        for(var m = sg.a; m < sg.b; m++){
+          var idx = Math.floor(Math.floor((m % 1440) / 60) / SLOT_SIZE);
+          slots[idx] += sg.rate;
+        }
+      });
     });
     return slots; // mảng 8 phần tử = GMV mỗi khung
   }
@@ -1123,7 +1187,7 @@
     rev.forEach(function(d){
       (byChan[d.channel] = byChan[d.channel] || {rev:0, hours:0}).rev += d.revenue;
       totalRev += d.revenue; days[d.channel+'|'+d.date] = 1;
-      if(d.sessions > 1) multiSession = true;
+      if(d.overlap) multiSession = true;
     });
     hrs.forEach(function(d){
       (byChan[d.channel] = byChan[d.channel] || {rev:0, hours:0}).hours += d.hours;
@@ -1188,7 +1252,7 @@
         + '<div class="donut-legend">'+legend+'</div></div>'
       : '<div class="lg-row"><span class="lg-name" style="color:var(--text-faint)">Chưa có số liệu GMV.</span></div>';
     var note = cs.multiSession
-      ? '<p style="font-size:11.5px;color:var(--text-faint);margin-top:12px">* Có ngày gồm nhiều phiên live (GMV reset) — doanh số đã cộng theo từng phiên.</p>'
+      ? '<p style="font-size:11.5px;color:var(--text-faint);margin-top:12px">* Có ngày nhiều Host live chồng giờ — doanh số kênh đã loại phần trùng, mỗi khung giờ chỉ tính 1 lần.</p>'
       : '';
 
     // ----- Bars: HIỆU SUẤT nhân sự (GMV ghi nhận để tính thưởng) -----
@@ -3504,15 +3568,20 @@
     }
   }
 
-  function doCheckIn(){
+  function doCheckIn(confirmGmv){
     if(!ciPhoto){ toast('Vui lòng chụp ảnh đầu ca.', true); return; }
     var rec = { channel:$('ci_channel').value, position:$('ci_position').value, gmvStart: parseVND($('ci_gmv').value) };
+    if(confirmGmv === true) rec.confirmGmv = true;
     if(!rec.channel){ toast('Vui lòng chọn kênh.', true); return; }
     setCheckLoading('checkInBtn', true);
     google.script.run
       .withSuccessHandler(function(res){
         setCheckLoading('checkInBtn', false);
         if(authGate(res)) return;
+        if(res && res.needConfirm){
+          if(window.confirm('⚠ ' + res.warn + '\n\nBấm OK nếu số bạn nhập ĐÚNG và muốn lưu.\nBấm Hủy để kiểm tra lại số đồng hồ.')) doCheckIn(true);
+          return;
+        }
         if(!res || !res.success){ toast((res && res.error) || 'Check-in thất bại.', true); return; }
         if(res.channels) AUTH.channels = res.channels; // tự ghi nhận kênh vào tài khoản
         toast('Đã check-in. Chúc ca live bùng nổ!');
@@ -3523,7 +3592,7 @@
       .checkIn(AUTH.token, rec, ciPhoto);
   }
 
-  function doCheckOut(){
+  function doCheckOut(confirmGmv){
     if(!coPhoto){ toast('Vui lòng chụp ảnh cuối ca.', true); return; }
     var id = $('checkOutForm').getAttribute('data-id');
     var gmvEnd = parseVND($('co_gmv').value);
@@ -3532,13 +3601,17 @@
       .withSuccessHandler(function(res){
         setCheckLoading('checkOutBtn', false);
         if(authGate(res)) return;
+        if(res && res.needConfirm){
+          if(window.confirm('⚠ ' + res.warn + '\n\nBấm OK nếu số bạn nhập ĐÚNG và muốn lưu.\nBấm Hủy để kiểm tra lại số đồng hồ.')) doCheckOut(true);
+          return;
+        }
         if(!res || !res.success){ toast((res && res.error) || 'Check-out thất bại.', true); return; }
         toast('Đã check-out. Cảm ơn bạn!');
         coPhoto = null; $('co_gmv').value=''; $('co_preview').style.display='none'; $('co_photo').value='';
         loadShifts();
       })
       .withFailureHandler(onFailure)
-      .checkOut(AUTH.token, id, gmvEnd, coPhoto);
+      .checkOut(AUTH.token, id, gmvEnd, coPhoto, confirmGmv === true);
   }
 
   // Xem ảnh chấm công của 1 ca

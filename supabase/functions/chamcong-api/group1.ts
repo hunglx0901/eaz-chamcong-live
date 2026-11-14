@@ -316,6 +316,37 @@ export async function getShiftPhoto(token: string, shiftId: string, which: strin
   return data ? ok({ data }) : fail("Ảnh đã hết hạn lưu trữ.");
 }
 
+/* ---- Kiểm tra đồng hồ GMV (cảnh báo mềm, cho nhân viên xác nhận) ----
+   Mỗi kênh chỉ chạy 1 phiên live; đồng hồ về 0 khi mở phiên mới (hợp lệ).
+   Chỉ cảnh báo khi số nhập TỤT NHẸ (từ 50% số gần nhất trở lên) mà không về 0 => nhiều khả năng nhập nhầm. */
+const hhmmToMin = (t: string) => { const p = String(t || "").split(":"); return (Number(p[0]) || 0) * 60 + (Number(p[1]) || 0); };
+const gmvTol = (m: number) => Math.max(500000, 0.03 * m);
+async function gmvDropWarn(channel: string, ngay: string, nowMin: number, excludeId: string | null, v: number, kind: "đầu" | "cuối"): Promise<string> {
+  if (!(v > 0)) return "";
+  const rows = await sql`select id, ten, bat_dau, ket_thuc, gmv_dau, gmv_cuoi from chamcong.ca_live
+    where ngay=${ngay} and lower(trim(kenh))=${L(channel)} and vi_tri='Host Live'`;
+  let best: { t: number; v: number; ten: string } | null = null;
+  const consider = (t: number, val: number, ten: string) => {
+    if (t > nowMin) return;
+    if (!best || t > best.t || (t === best.t && val > best.v)) best = { t, v: val, ten };
+  };
+  rows.forEach((r) => {
+    if (excludeId && String(r.id) === excludeId) return;
+    const s = hhmmToMin(asTimeStr(r.bat_dau));
+    const endStr = String(r.ket_thuc ?? "").trim();
+    if (endStr) { let e = hhmmToMin(asTimeStr(r.ket_thuc)); if (e < s) e += 1440; consider(e, num(r.gmv_cuoi), String(r.ten)); }
+    else consider(s, num(r.gmv_dau), String(r.ten));
+  });
+  const ref = best as { t: number; v: number; ten: string } | null;
+  if (!ref || !(ref.v > 0)) return "";
+  if (v < ref.v - gmvTol(ref.v) && v >= ref.v * 0.5) {
+    const hh = String(Math.floor((ref.t % 1440) / 60)).padStart(2, "0") + ":" + String(ref.t % 60).padStart(2, "0");
+    return `GMV ${kind} ca bạn nhập (${fmtVnd(v)}đ) THẤP HƠN số gần nhất của kênh ${channel} (${fmtVnd(ref.v)}đ, ${ref.ten} ghi lúc ${hh}). ` +
+      `Đồng hồ không về 0 nên có thể bạn nhập nhầm. Nếu vừa bắt đầu phiên live mới thì đồng hồ phải về 0 rồi tăng lại.`;
+  }
+  return "";
+}
+
 export async function checkIn(token: string, rec: any, photoB64: string) {
   const auth = await verifyToken(token); if (!auth) return authErr();
   if (auth.role !== "staff") return fail("Chức năng chấm công chỉ dành cho Nhân viên.");
@@ -326,6 +357,12 @@ export async function checkIn(token: string, rec: any, photoB64: string) {
   if (!rec.position) return fail("Vui lòng chọn vị trí.");
   const open = await sql`select 1 from chamcong.ca_live where lower(ten)=${L(rec.name)} and trim(coalesce(ket_thuc,''))=''`;
   if (open.length) return fail("Đang có một ca chưa check-out. Hãy check-out trước.");
+  if (!rec.confirmGmv) {
+    try {
+      const warn = await gmvDropWarn(String(rec.channel), todayStr(), hhmmToMin(timeStr()), null, num(rec.gmvStart), "đầu");
+      if (warn) return { success: false, needConfirm: true, warn };
+    } catch { /* lỗi kiểm tra không được chặn chấm công */ }
+  }
   const photo = await savePhoto(photoB64, "in");
   const id = crypto.randomUUID(), gs = num(rec.gmvStart), inTime = roundInTime(timeStr());
   await sql`insert into chamcong.ca_live(id,ngay,ten,vi_tri,kenh,bat_dau,ket_thuc,gio_live,gmv,ghi_chu,tao_luc,gmv_dau,gmv_cuoi,anh_dau,anh_cuoi)
@@ -357,7 +394,7 @@ export async function checkIn(token: string, rec: any, photoB64: string) {
   return ok({ id, channels: newChans });
 }
 
-export async function checkOut(token: string, shiftId: string, gmvEnd: number, photoB64: string) {
+export async function checkOut(token: string, shiftId: string, gmvEnd: number, photoB64: string, confirmGmv?: boolean) {
   const auth = await verifyToken(token); if (!auth) return authErr();
   if (auth.role !== "staff") return fail("Chức năng chấm công chỉ dành cho Nhân viên.");
   if (!photoB64) return fail("Cần chụp ảnh cuối ca.");
@@ -368,6 +405,14 @@ export async function checkOut(token: string, shiftId: string, gmvEnd: number, p
   if (String(s.ket_thuc || "").trim()) return fail("Ca này đã check-out rồi.");
   const start = asTimeStr(s.bat_dau), gs = num(s.gmv_dau), ge = num(gmvEnd);
   if (ge < gs) return fail("GMV cuối ca phải ≥ GMV đầu ca.");
+  if (!confirmGmv) {
+    try {
+      const ngay = s.ngay ? new Date(s.ngay).toISOString().slice(0, 10) : todayStr();
+      const nowMin = hhmmToMin(timeStr()) + (ngay !== todayStr() ? 1440 : 0);
+      const warn = await gmvDropWarn(String(s.kenh), ngay, nowMin, shiftId, ge, "cuối");
+      if (warn) return { success: false, needConfirm: true, warn };
+    } catch { /* lỗi kiểm tra không được chặn chấm công */ }
+  }
   let end = roundOutTime(timeStr()); if (start === end) end = timeStr();
   const photo = await savePhoto(photoB64, "out");
   await sql`update chamcong.ca_live set ket_thuc=${end}, gio_live=${computeHours(start, end)}, gmv=${ge - gs}, gmv_cuoi=${ge}, anh_cuoi=${photo} where id=${shiftId}`;

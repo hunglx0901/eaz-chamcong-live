@@ -482,3 +482,9 @@
   .req-reason { margin-top:6px; font-size:12.5px; color:#d6356e; }
   .req-modal-info { font-weight:700; font-size:14px; color:var(--text); }
 
+
+/* Cảnh báo đồng hồ GMV (Lead/Admin/Owner) */
+.hist-item.has-warn { border:1px solid #f6c66b; background:rgba(246,198,107,.10); }
+.gmv-warn { margin-top:7px; padding:7px 10px; border-radius:10px; background:rgba(246,198,107,.18); color:#b7791f; font-size:12px; line-height:1.45; }
+.gmv-warn b { display:block; margin-bottom:2px; }
+.gmv-warn ul { margin:0; padding-left:16px; }
